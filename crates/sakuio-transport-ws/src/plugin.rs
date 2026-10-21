@@ -13,7 +13,7 @@ use sakuio_board::{
 };
 use sakuio_core::{flush_pending_ping_commands, AgentCommandBus, new_session_id};
 use sakuio_db::ClientRepository;
-use sakuio_protocol::{TelemetryBatch};
+use sakuio_protocol::{ControlMessage, TelemetryBatch};
 use serde::Deserialize;
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -74,6 +74,23 @@ pub async fn ws_upgrade(
     })
 }
 
+/// Translates low-level websocket / IO errors into operator-friendly reasons.
+/// 把底层 websocket / IO 错误翻译成运维可读的断开原因。
+fn friendly_link_error(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("connection reset without closing handshake") {
+        "agent exited or network dropped (connection reset, no closing handshake)".into()
+    } else if lower.contains("reset by peer") {
+        "connection reset by peer (agent exited or network dropped)".into()
+    } else if lower.contains("refused") {
+        "connection refused".into()
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "connection timed out".into()
+    } else {
+        raw.to_string()
+    }
+}
+
 async fn run_link_session(
     db: SqlitePool,
     handler: Arc<dyn BoardSessionHandler>,
@@ -112,6 +129,45 @@ async fn run_link_session(
     flush_pending_ping_commands(board.as_ref(), &command_bus, &node_uuid).await;
     let mut cmd_rx = command_bus.register(&node_uuid).await;
 
+    // Run the event loop, then always unregister + fire on_disconnect so the
+    // node is marked offline even when the loop exits with an error (e.g.
+    // connection reset without a closing handshake).
+    // 先跑事件循环，随后无论正常结束还是报错都注销并触发 on_disconnect，
+    // 保证节点一定被标记离线（如未握手直接断开的连接重置）。
+    let outcome = link_event_loop(
+        &handler,
+        &mut session,
+        &mut cmd_rx,
+        &node_uuid,
+        &session_id,
+    )
+    .await;
+
+    command_bus.unregister(&node_uuid).await;
+    handler.on_disconnect(node_uuid.clone(), session_id).await;
+
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            tracing::warn!(
+                node_uuid = %node_uuid,
+                reason = %friendly_link_error(&e),
+                "agent disconnected unexpectedly"
+            );
+            Err(e)
+        }
+    }
+}
+
+/// Session event loop: outbound commands, inbound frames, telemetry ingest.
+/// 会话事件循环：下发命令、接收帧、遥测入库。
+async fn link_event_loop(
+    handler: &Arc<dyn BoardSessionHandler>,
+    session: &mut WsBoardSession,
+    cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ControlMessage>,
+    node_uuid: &str,
+    session_id: &str,
+) -> Result<(), String> {
     loop {
         tokio::select! {
             outbound = cmd_rx.recv() => {
@@ -119,17 +175,17 @@ async fn run_link_session(
                     Some(msg) => {
                         session.send(BoardFrame::Control(msg)).await?;
                     }
-                    None => break,
+                    None => return Ok(()),
                 }
             }
             frame = session.recv() => {
                 let Some(frame) = frame? else {
-                    break;
+                    return Ok(());
                 };
                 match frame {
                     BoardFrame::Control(msg) => {
                         let replies = handler
-                            .on_control(&node_uuid, &session_id, msg)
+                            .on_control(node_uuid, session_id, msg)
                             .await?;
                         for reply in replies {
                             session
@@ -142,7 +198,7 @@ async fn run_link_session(
                             cbor4ii::serde::from_reader(payload.body.as_slice())
                                 .map_err(|e| e.to_string())?;
                         if let Some(ack) = handler
-                            .on_telemetry(&node_uuid, &session_id, payload.batch_seq, batch)
+                            .on_telemetry(node_uuid, session_id, payload.batch_seq, batch)
                             .await?
                         {
                             session.send(BoardFrame::Control(ack)).await?;
@@ -152,8 +208,4 @@ async fn run_link_session(
             }
         }
     }
-
-    command_bus.unregister(&node_uuid).await;
-    handler.on_disconnect(node_uuid, session_id).await;
-    Ok(())
 }
