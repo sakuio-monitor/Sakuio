@@ -1063,3 +1063,4 @@ fn generate_token() -> String {
     let mut bytes = [0u8; 32];
     thread_rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
+}
