@@ -1,0 +1,96 @@
+# CI/CD 流程（统一说明）
+
+适用三个仓库：`Sakuio`（中控）、`Sakuio-agent`（探针）、`Sakuio-frontend`（前端）。
+本文档是三仓库 CI/CD 的唯一权威说明，改动流程时同步更新此文件。
+
+## 1. 仓库角色与依赖关系
+
+```
+Sakuio（主仓库）
+  crates/sakuio-protocol   Agent 协议定义
+  crates/sakuio-board      Agent 会话 / 传输抽象
+  crates/sakuio-server     中控服务（依赖上面两个）
+Sakuio-agent（探针）
+  通过相对路径依赖 ../sakuio/crates/{sakuio-protocol, sakuio-board}
+Sakuio-frontend（前端）
+  bun workspace，纯前端，与上面两个无构建期依赖
+```
+
+由于 Agent 仓库使用 `../sakuio` 相对路径依赖，CI 中检出主仓库到
+`$GITHUB_WORKSPACE/sakuio` 并软链到上一级目录（见 release.yml）。
+
+## 2. Sakuio-agent：打 tag 自动构建发布
+
+**触发**：推送 `v*` 格式的 tag（如 `v0.0.1`），或 GitHub Actions 页面手动
+`workflow_dispatch`。
+
+**流程**（`.github/workflows/release.yml`）：
+
+1. `build` job 按矩阵交叉编译，产出裸二进制（无压缩包，对齐 Komari 风格）：
+
+   | 目标 | 工具链 | 资产名 |
+   |---|---|---|
+   | linux x86_64 | cargo-zigbuild | `sakuio-agent-linux-amd64` |
+   | linux i686 | cargo-zigbuild | `sakuio-agent-linux-386` |
+   | linux aarch64 | cargo-zigbuild | `sakuio-agent-linux-arm64` |
+   | linux armv7 | cargo-zigbuild | `sakuio-agent-linux-arm` |
+   | linux loongarch64 | cargo-zigbuild | `sakuio-agent-linux-loong64` |
+   | linux riscv64 | cargo-zigbuild | `sakuio-agent-linux-riscv64` |
+   | linux mips (musl) | 内置 rust-lld | `sakuio-agent-linux-mips` |
+   | linux mipsel (musl) | 内置 rust-lld | `sakuio-agent-linux-mipsel` |
+   | darwin aarch64 | 原生 | `sakuio-agent-darwin-arm64` |
+   | darwin x86_64 | 原生 | `sakuio-agent-darwin-amd64` |
+   | windows x86_64 | MSVC | `sakuio-agent-windows-amd64.exe` |
+   | windows i686 | MSVC | `sakuio-agent-windows-386.exe` |
+   | windows aarch64 | MSVC | `sakuio-agent-windows-arm64.exe` |
+
+   说明：
+   - Linux gnu 系目标全部走 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
+     （zig 交叉编译，无需目标平台系统库）。
+   - **MIPS 不走 zig**：zig 已移除 MIPS 支持。`mips / mipsel-unknown-linux-musl`
+     是 Rust tier 2 self-contained 目标，直接 `cargo build` 用内置 rust-lld
+     静态链接。
+   - macOS 在 `macos-14`（Apple Silicon）上原生编译并交叉出 x86_64。
+   - Windows 在 `windows-2022` 上用 MSVC 交叉编译 386 / arm64。
+
+2. `release` job：合并全部产物，发布到对应 tag 的 GitHub Release
+   （自动生成 release notes）。
+
+**发版步骤**：
+
+```bash
+# 1. 修改 Sakuio-agent/Cargo.toml 的 workspace.package.version
+# 2. 提交推送
+git commit -am "chore: bump version to x.y.z" && git push
+# 3. 打 tag 触发构建
+git tag vx.y.z && git push origin vx.y.z
+```
+
+**一键安装命令约定**（管理端「添加服务器」实时生成）：
+
+```
+curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio-agent/refs/heads/main/install.sh \
+  | sudo bash -s -- -e <端点> -t <token> [安装选项...]
+```
+
+`install.sh` 按 `sakuio-agent-<os>-<arch>` 命名从 Release 下载裸二进制，
+支持 `--github-proxy` 加速、`--version` 锁定版本。
+
+## 3. Sakuio（中控）
+
+当前无 CI：本地 `cargo run` 验证，发布流程待迁移数据面稳定后接入
+（计划：tag `v*` 构建 linux-amd64/arm64 产物 + 迁移校验）。改动推送前
+必须本地编译通过。
+
+## 4. Sakuio-frontend（前端）
+
+当前无 CI：bun workspace，`bun run dev:admin` 本地验证；构建检查
+（`bun run build` + 类型检查）接入 CI 时同样以 tag / main 分支推送触发，
+流程更新时回写本文档。
+
+## 5. 约定
+
+- 版本号：三仓库独立版本，agent 从 `0.0.1` 起步，SemVer。
+- tag 命名：`v<semver>`；仓库同名 tag 即 release。
+- 任何 CI 产物与提交中不得包含：数据库文件、环境配置、密钥、
+  竞品名称字符串（见各仓库 .gitignore）。
