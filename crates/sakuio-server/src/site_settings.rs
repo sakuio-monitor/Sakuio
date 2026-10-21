@@ -53,7 +53,7 @@ fn default_geoip_enabled() -> bool {
 }
 
 fn default_geoip_provider() -> String {
-    sakuio_notify::ipgeo::PROVIDER_IP9.into()
+    sakuio_notify::ipgeo::PROVIDER_IPAPI.into()
 }
 
 impl Default for SiteSettings {
@@ -86,11 +86,14 @@ impl Default for SiteSettings {
 /// 自动发现密钥只在首次启动（尚无设置记录或未生成过）时生成，之后留空即表示禁用。
 pub async fn bootstrap_defaults(state: &AppState) {
     let mut settings = load(state).await;
-    if !settings.auto_discovery_generated {
-        // 一次性迁移：老库默认的 geojs 切到 ip9。
-        if settings.geoip_provider == sakuio_notify::ipgeo::PROVIDER_GEOJS {
-            settings.geoip_provider = default_geoip_provider();
+    // geojs 老库一律迁到当前默认源（ip-api），不限于首次启动
+    if settings.geoip_provider == sakuio_notify::ipgeo::PROVIDER_GEOJS {
+        settings.geoip_provider = default_geoip_provider();
+        if let Err(e) = save(state, &settings).await {
+            tracing::error!(error = ?e, "failed to migrate geoip provider");
         }
+    }
+    if !settings.auto_discovery_generated {
         if settings.auto_discovery_key.is_empty() {
             settings.auto_discovery_key = format!(
                 "{}{}",
@@ -323,6 +326,7 @@ pub async fn put_site_settings(
         settings.geoip_mmdb_url = v.trim().to_string();
     }
     sakuio_notify::ipgeo::clear_cache();
+    crate::geoip_resolver::invalidate_all();
     match save(&state, &settings).await {
         Ok(()) => Json(json!({ "settings": settings })).into_response(),
         Err(status) => api_error_db(status),
@@ -453,6 +457,7 @@ pub async fn update_geoip_db(State(state): State<AppState>, _admin: AdminUser) -
     {
         Ok(bytes) => {
             sakuio_notify::ipgeo::clear_cache();
+            crate::geoip_resolver::invalidate_all();
             Json(json!({ "updated": true, "bytes": bytes })).into_response()
         }
         Err(e) => (

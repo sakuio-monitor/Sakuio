@@ -26,8 +26,8 @@ fn mem() -> &'static RwLock<HashMap<String, CacheEntry>> {
 const BASE_TTL_SECS: u64 = 7 * 86400;
 /// 抖动幅度：±48 小时（实际 TTL ∈ [5d, 9d]）。
 const JITTER_SECS: u64 = 2 * 86400;
-/// 空 / 失败结果的负缓存时长，避免每轮重复请求上游。
-const NEGATIVE_TTL: Duration = Duration::from_secs(10 * 60);
+/// 空 / 失败结果的负缓存时长（Komari 不缓存失败结果；这里留 60s 防止持续打挂的上游被重试打爆）。
+const NEGATIVE_TTL: Duration = Duration::from_secs(60);
 
 fn jittered_ttl() -> Duration {
     Duration::from_secs(BASE_TTL_SECS - JITTER_SECS + rand_jitter_secs())
@@ -72,6 +72,14 @@ pub fn region_code_for(ip: &str) -> String {
         return String::new();
     }
     mem_read(ip).unwrap_or_default()
+}
+
+/// 立即清空全部解析缓存（对齐 Komari geoCache.Flush）：
+/// 切换提供商 / 更新 mmdb 后调用，下一个 tick 全量按新源重解析。
+pub fn invalidate_all() {
+    if let Ok(mut map) = mem().write() {
+        map.clear();
+    }
 }
 
 /// 读取有效缓存条目；过期视为未命中（由下一轮 tick 重新解析）。

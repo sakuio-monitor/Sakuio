@@ -96,6 +96,7 @@ pub async fn lookup_with(provider: &str, ip: &str) -> Option<String> {
 /// Resolves geo information (country code + location text) with an explicit provider.
 /// Providers: `geojs` (geojs.io), `ip-api` (ip-api.com), `mmdb` (local GeoLite database).
 /// Results are cached with a TTL; failures are only cached briefly.
+/// 单次请求失败立即重试一次，两次都失败才按失败缓存。
 pub async fn lookup_info_with(provider: &str, ip: &str) -> Option<GeoInfo> {
     let ip = ip.trim();
     if is_private_ip(ip) {
@@ -105,16 +106,24 @@ pub async fn lookup_info_with(provider: &str, ip: &str) -> Option<GeoInfo> {
     if let Some(cached) = cached_valid(&cache_key) {
         return cached;
     }
-    let result = match provider {
-        PROVIDER_IP9 => lookup_ip9(ip).await,
-        PROVIDER_IPAPI => lookup_ip_api(ip).await,
-        PROVIDER_MMDB => lookup_mmdb(ip),
-        _ => lookup_geojs(ip).await,
+    let result = match lookup_one(provider, ip).await {
+        Some(info) => Some(info),
+        // 一次失败立刻重试（网络抖动/瞬时超时），仍失败才接受
+        None => lookup_one(provider, ip).await,
     };
     if let Ok(mut c) = cache().lock() {
         c.insert(cache_key, (result.clone(), std::time::Instant::now()));
     }
     result
+}
+
+async fn lookup_one(provider: &str, ip: &str) -> Option<GeoInfo> {
+    match provider {
+        PROVIDER_IP9 => lookup_ip9(ip).await,
+        PROVIDER_IPAPI => lookup_ip_api(ip).await,
+        PROVIDER_MMDB => lookup_mmdb(ip),
+        _ => lookup_geojs(ip).await,
+    }
 }
 
 const SUCCESS_TTL: Duration = Duration::from_secs(60 * 60);
