@@ -36,8 +36,6 @@ Sakuio-frontend（前端）
    | linux armv7 | cargo-zigbuild | `sakuio-agent-linux-arm` |
    | linux loongarch64 | cargo-zigbuild | `sakuio-agent-linux-loong64` |
    | linux riscv64 | cargo-zigbuild | `sakuio-agent-linux-riscv64` |
-   | linux mips (musl) | 内置 rust-lld | `sakuio-agent-linux-mips` |
-   | linux mipsel (musl) | 内置 rust-lld | `sakuio-agent-linux-mipsel` |
    | darwin aarch64 | 原生 | `sakuio-agent-darwin-arm64` |
    | darwin x86_64 | 原生 | `sakuio-agent-darwin-amd64` |
    | windows x86_64 | MSVC | `sakuio-agent-windows-amd64.exe` |
@@ -46,10 +44,11 @@ Sakuio-frontend（前端）
 
    说明：
    - Linux gnu 系目标全部走 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
-     （zig 交叉编译，无需目标平台系统库）。
-   - **MIPS 不走 zig**：zig 已移除 MIPS 支持。`mips / mipsel-unknown-linux-musl`
-     是 Rust tier 2 self-contained 目标，直接 `cargo build` 用内置 rust-lld
-     静态链接。
+     （zig 交叉编译，无需目标平台系统库；zig 版本锁定 `0.14.1`，
+     `0.17` 仍是预发布版无正式包）。
+   - **MIPS 暂不提供**：Rust 上游已移除 mips 预编译 std
+     （新版 rustup 对旧通道也拒绝下载），且 zig 不支持 MIPS。后续如需
+     mips/mipsel，可评估 nightly `-Z build-std` 自行编标准库的方案。
    - macOS 在 `macos-14`（Apple Silicon）上原生编译并交叉出 x86_64。
    - Windows 在 `windows-2022` 上用 MSVC 交叉编译 386 / arm64。
 
