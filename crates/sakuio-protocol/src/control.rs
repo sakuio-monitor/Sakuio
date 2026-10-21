@@ -88,6 +88,19 @@ pub struct HelloParams {
     pub capabilities: Vec<String>,
 }
 
+/// Board-advertised compatible agent version range (inclusive bounds).
+/// 面板声明的兼容 Agent 版本区间（含边界）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentVersionRange {
+    pub min: String,
+    pub max: String,
+}
+
+/// 兼容区间随面板发布维护：协议变更或新增兼容 Agent 版本时同步调整。
+/// Agent 自动更新只升到该区间内的最新版本；旧面板未下发区间时 Agent 保守地只升当前版本线。
+pub const AGENT_VERSION_RANGE_MIN: &str = "0.0.1";
+pub const AGENT_VERSION_RANGE_MAX: &str = "0.2.5";
+
 /// Server welcome payload after token authentication.
 /// Token 鉴权通过后服务端下发的 welcome 载荷。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +112,10 @@ pub struct WelcomeParams {
     /// 服务端分配的节点 token（自动发现注册时下发）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_token: Option<String>,
+    /// Compatible agent version range advertised by the board.
+    /// 面板声明的兼容 Agent 版本区间，自动更新以此为上界。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_version_range: Option<AgentVersionRange>,
 }
 
 /// Static host information reported by the agent at connect time.
