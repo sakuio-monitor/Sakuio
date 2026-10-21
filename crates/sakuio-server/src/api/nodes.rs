@@ -31,12 +31,52 @@ fn default_admin_clients_limit() -> u32 {
     20
 }
 
-/// 按节点 IP（v4 优先）填充 v4 / v6 归属地国家代码（统一 GeoIP 缓存）。
-fn fill_geo_regions(region: &mut String, region6: &mut String, ipv4: &str, ipv6: &str) {
-    let v4 = ipv4.trim();
-    let v6 = ipv6.trim();
-    *region = crate::geoip_resolver::region_code_for(if v4.is_empty() { v6 } else { v4 });
-    *region6 = crate::geoip_resolver::region_code_for(v6);
+/// 按节点 IP（v4 优先）填充 v4 / v6 归属地国家代码。
+/// 优先读 clients 表持久化的归属地（面板重启后立即可用），
+/// 库里没有时回退到内存 GeoIP 缓存（由后台解析器 tick 写回数据库）。
+fn fill_geo_regions(client: &mut sakuio_db::AdminClientRecord) {
+    if client.region.is_empty() && !client.ipv4.trim().is_empty() {
+        client.region = crate::geoip_resolver::region_code_for(&client.ipv4);
+    }
+    if client.region6.is_empty() && !client.ipv6.trim().is_empty() {
+        client.region6 = crate::geoip_resolver::region_code_for(&client.ipv6);
+    }
+}
+
+/// Fills online state and the runtime subset (cumulative traffic / disk /
+/// uptime), preferring the in-memory snapshot and falling back to the values
+/// persisted from telemetry so totals survive a board restart.
+/// 填充在线状态与运行时子集（累计流量 / 磁盘 / 运行时长）：
+/// 优先内存快照，快照缺失时回退到遥测持久化的最后值，面板重启不清零。
+fn attach_runtime(
+    client: &mut sakuio_db::AdminClientRecord,
+    snap: Option<sakuio_board::RuntimeSnapshot>,
+) {
+    if let Some(snap) = snap {
+        if snap.observed_at_ms > 0 {
+            client.online = snap.online;
+        }
+        client.runtime = Some(serde_json::json!({
+            "net_total_up": snap.net_total_up,
+            "net_total_down": snap.net_total_down,
+            "disk_used": snap.disk_used,
+            "disk_total": snap.disk_total,
+            "uptime_secs": snap.uptime_secs,
+        }));
+    } else {
+        let last_up = client.last_net_total_up;
+        let last_down = client.last_net_total_down;
+        let last_uptime = client.last_uptime_secs;
+        if last_up.is_some() || last_down.is_some() || last_uptime.is_some() {
+            client.runtime = Some(serde_json::json!({
+                "net_total_up": last_up,
+                "net_total_down": last_down,
+                "disk_used": None::<i64>,
+                "disk_total": None::<i64>,
+                "uptime_secs": last_uptime,
+            }));
+        }
+    }
 }
 
 /// GET `/api/admin/clients` — admin client registry (cursor pagination).
@@ -52,12 +92,14 @@ pub async fn list_admin_clients(
     {
         Ok(mut page) => {
             for client in &mut page.items {
-                fill_geo_regions(&mut client.region, &mut client.region6, &client.ipv4, &client.ipv6);
-                if let Ok(Some(snap)) = state.board.get_latest_snapshot(&client.uuid).await {
-                    if snap.observed_at_ms > 0 {
-                        client.online = snap.online;
-                    }
-                }
+                fill_geo_regions(client);
+                let snap = state
+                    .board
+                    .get_latest_snapshot(&client.uuid)
+                    .await
+                    .ok()
+                    .flatten();
+                attach_runtime(client, snap);
             }
             Json(serde_json::json!({
                 "items": page.items,
@@ -85,19 +127,14 @@ async fn admin_clients_snapshot(
     let repo = ClientRepository::new(&state.db);
     let mut page = repo.list_admin_page(cursor, limit).await?;
     for client in &mut page.items {
-        fill_geo_regions(&mut client.region, &mut client.region6, &client.ipv4, &client.ipv6);
-        if let Ok(Some(snap)) = state.board.get_latest_snapshot(&client.uuid).await {
-            if snap.observed_at_ms > 0 {
-                client.online = snap.online;
-            }
-            client.runtime = Some(serde_json::json!({
-                "net_total_up": snap.net_total_up,
-                "net_total_down": snap.net_total_down,
-                "disk_used": snap.disk_used,
-                "disk_total": snap.disk_total,
-                "uptime_secs": snap.uptime_secs,
-            }));
-        }
+        fill_geo_regions(client);
+        let snap = state
+            .board
+            .get_latest_snapshot(&client.uuid)
+            .await
+            .ok()
+            .flatten();
+        attach_runtime(client, snap);
     }
     Ok(serde_json::json!({
         "items": page.items,

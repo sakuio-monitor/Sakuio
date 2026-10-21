@@ -148,6 +148,10 @@ impl BoardSessionHandler for LinkSessionHandler {
                     server_time_ms: chrono::Utc::now().timestamp_millis(),
                     node_uuid: node_uuid.to_string(),
                     node_token: clients.token_by_uuid(node_uuid).await.ok().flatten(),
+                    agent_version_range: Some(sakuio_protocol::AgentVersionRange {
+                        min: sakuio_protocol::AGENT_VERSION_RANGE_MIN.to_string(),
+                        max: sakuio_protocol::AGENT_VERSION_RANGE_MAX.to_string(),
+                    }),
                 };
                 Ok(vec![ControlMessage::new(
                     ControlOp::Welcome,
@@ -184,7 +188,7 @@ impl BoardSessionHandler for LinkSessionHandler {
                     .touch_last_seen(node_uuid)
                     .await
                     .map_err(|e| e.to_string())?;
-                tracing::info!(node_uuid = %node_uuid, "basic host info stored");
+                tracing::debug!(node_uuid = %node_uuid, "basic host info stored");
                 Ok(Vec::new())
             }
             ControlOp::Heartbeat => {
@@ -267,6 +271,18 @@ impl BoardSessionHandler for LinkSessionHandler {
             .map_err(state_err)?;
         let clients = ClientRepository::new(&self.db);
         let _ = clients.touch_last_seen(node_uuid).await;
+        // Persist cumulative counters so totals survive board restarts.
+        // 持久化累计值，保证面板重启后总流量 / 运行时长不清零。
+        if let Some(sample) = batch.samples.last() {
+            let _ = clients
+                .update_last_runtime(
+                    node_uuid,
+                    sample.network.total_up,
+                    sample.network.total_down,
+                    sample.uptime,
+                )
+                .await;
+        }
         tracing::debug!(
             node_uuid = %node_uuid,
             batch_seq,

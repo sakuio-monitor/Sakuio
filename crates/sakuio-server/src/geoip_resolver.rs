@@ -143,10 +143,16 @@ async fn tick(state: &AppState, last_provider: &mut String) -> Result<(), String
         .await
         .map_err(|e| e.to_string())?;
 
-    // 收集全部待解析 IP（连接地址 + basic_info 上报地址，v4/v6 一起），跳过已缓存与私网
+    // 收集全部待解析 IP（连接地址 + basic_info 上报地址，v4/v6 一起），跳过已缓存与私网。
+    // 同时记录 ip -> (uuid, is_v6) 归属，解析成功后把国家代码写回 clients 表，
+    // 面板重启后列表直接读库渲染旗帜，无需等待重新解析。
     let mut ips: HashSet<String> = HashSet::new();
+    let mut ip_targets: HashMap<String, Vec<(&str, bool)>> = HashMap::new();
     for row in &rows {
-        ips.extend(client_ips(row));
+        for (ip, is_v6) in client_ips(row) {
+            ips.insert(ip.clone());
+            ip_targets.entry(ip).or_default().push((&row.uuid, is_v6));
+        }
     }
     ips.retain(|ip| !ip.is_empty() && !sakuio_notify::ipgeo::is_private_ip(ip));
 
@@ -155,41 +161,53 @@ async fn tick(state: &AppState, last_provider: &mut String) -> Result<(), String
         .filter(|ip| mem_read(ip).is_none())
         .collect();
     pending.sort();
-    for ip in pending {
+    for ip in &pending {
         // 全局限速排队：节点再多也不会超过 15 req/s
         acquire_query_slot().await;
-        let info = sakuio_notify::ipgeo::lookup_info_with(&settings.geoip_provider, &ip).await;
+        let info = sakuio_notify::ipgeo::lookup_info_with(&settings.geoip_provider, ip).await;
         match info {
             Some(info) if !info.country_code.is_empty() => {
-                mem_insert(&ip, &info.country_code, jittered_ttl());
+                mem_insert(ip, &info.country_code, jittered_ttl());
+                // 解析成功：按 v4 / v6 归属写回 clients 表（失败 / 负缓存不写，保留旧值）
+                let repo = ClientRepository::new(&state.db);
+                for (uuid, is_v6) in ip_targets.get(ip).into_iter().flatten() {
+                    let res = repo.update_geo_regions(
+                        uuid,
+                        (!is_v6).then_some(info.country_code.as_str()),
+                        is_v6.then_some(info.country_code.as_str()),
+                    );
+                    if let Err(e) = res.await {
+                        tracing::warn!(node_uuid = %uuid, error = %e, "failed to persist geo region");
+                    }
+                }
             }
             _ => {
-                mem_insert(&ip, "", NEGATIVE_TTL);
+                mem_insert(ip, "", NEGATIVE_TTL);
             }
         }
     }
     Ok(())
 }
 
-/// 节点的全部公网候选 IP（连接地址 + basic_info 上报地址）。
-fn client_ips(row: &PublicClientRow) -> Vec<String> {
+/// 节点的全部公网候选 IP（连接地址 + basic_info 上报地址），带 v4/v6 归属标记。
+fn client_ips(row: &PublicClientRow) -> Vec<(String, bool)> {
     let mut ips = Vec::new();
-    for raw in [&row.ipv4, &row.ipv6] {
+    for (raw, is_v6) in [(&row.ipv4, false), (&row.ipv6, true)] {
         for part in raw.split(',') {
             let ip = part.split('/').next().unwrap_or("").trim();
             if !ip.is_empty() {
-                ips.push(ip.to_string());
+                ips.push((ip.to_string(), is_v6));
             }
         }
     }
     if let Ok(v) =
         serde_json::from_str::<serde_json::Value>(row.basic_info_json.as_deref().unwrap_or(""))
     {
-        for key in ["ipv4", "ipv6"] {
+        for (key, is_v6) in [("ipv4", false), ("ipv6", true)] {
             if let Some(s) = v.get(key).and_then(|p| p.as_str()) {
                 let ip = s.split('/').next().unwrap_or("").trim();
                 if !ip.is_empty() {
-                    ips.push(ip.to_string());
+                    ips.push((ip.to_string(), is_v6));
                 }
             }
         }

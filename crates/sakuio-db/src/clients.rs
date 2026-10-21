@@ -89,6 +89,18 @@ pub struct AdminClientRecord {
     /// 流量重置方式：跟随计费周期 / 每月 1 日 / 不自动重置。
     #[serde(default)]
     pub traffic_reset_mode: String,
+    /// Last reported cumulative upload bytes (survives board restarts).
+    /// 最近一次上报的累计上传字节数（面板重启后仍可展示）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_net_total_up: Option<i64>,
+    /// Last reported cumulative download bytes (survives board restarts).
+    /// 最近一次上报的累计下载字节数（面板重启后仍可展示）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_net_total_down: Option<i64>,
+    /// Last reported OS uptime seconds (survives board restarts).
+    /// 最近一次上报的系统运行时长秒数（面板重启后仍可展示）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_uptime_secs: Option<i64>,
     /// Configured bandwidth value (unit in `bandwidth_unit`).
     /// 配置的带宽值（单位见 `bandwidth_unit`）。
     #[serde(default)]
@@ -195,6 +207,12 @@ pub struct PublicClientRow {
     pub disabled: bool,
     pub ipv4: String,
     pub ipv6: String,
+    /// Persisted IPv4 geolocation country code ("" unknown).
+    /// 持久化的 IPv4 归属地国家代码（"" 未知）。
+    pub region: String,
+    /// Persisted IPv6 geolocation country code ("" unknown).
+    /// 持久化的 IPv6 归属地国家代码（"" 未知）。
+    pub region6: String,
     pub agent_version: Option<String>,
     pub group_name: String,
     pub private_remark: String,
@@ -211,6 +229,15 @@ pub struct PublicClientRow {
     pub traffic_used_up: i64,
     pub traffic_used_down: i64,
     pub traffic_reset_mode: String,
+    /// Last reported cumulative upload bytes (survives board restarts).
+    /// 最近一次上报的累计上传字节数（面板重启后仍可展示）。
+    pub last_net_total_up: Option<i64>,
+    /// Last reported cumulative download bytes (survives board restarts).
+    /// 最近一次上报的累计下载字节数（面板重启后仍可展示）。
+    pub last_net_total_down: Option<i64>,
+    /// Last reported OS uptime seconds (survives board restarts).
+    /// 最近一次上报的系统运行时长秒数（面板重启后仍可展示）。
+    pub last_uptime_secs: Option<i64>,
     pub bandwidth: f64,
     pub bandwidth_unit: String,
 }
@@ -243,6 +270,8 @@ struct PublicClientRowRaw {
     disabled: i64,
     ipv4: String,
     ipv6: String,
+    region: String,
+    region6: String,
     agent_version: Option<String>,
     group_name: String,
     private_remark: String,
@@ -259,6 +288,9 @@ struct PublicClientRowRaw {
     traffic_used_up: i64,
     traffic_used_down: i64,
     traffic_reset_mode: String,
+    last_net_total_up: Option<i64>,
+    last_net_total_down: Option<i64>,
+    last_uptime_secs: Option<i64>,
     bandwidth: f64,
     bandwidth_unit: String,
 }
@@ -274,6 +306,8 @@ struct AdminClientRowRaw {
     disabled: i64,
     ipv4: String,
     ipv6: String,
+    region: String,
+    region6: String,
     agent_version: Option<String>,
     group_name: String,
     private_remark: String,
@@ -291,6 +325,9 @@ struct AdminClientRowRaw {
     traffic_used_down: i64,
     traffic_cycle_start: Option<String>,
     traffic_reset_mode: String,
+    last_net_total_up: Option<i64>,
+    last_net_total_down: Option<i64>,
+    last_uptime_secs: Option<i64>,
     bandwidth: f64,
     bandwidth_unit: String,
     sort_order: f64,
@@ -303,8 +340,8 @@ fn map_admin_client_row(row: AdminClientRowRaw) -> AdminClientRecord {
         token: row.token,
         online: row.online != 0,
         disabled: row.disabled != 0,
-        region: String::new(),
-        region6: String::new(),
+        region: row.region,
+        region6: row.region6,
         ipv4: row.ipv4,
         ipv6: row.ipv6,
         agent_version: row.agent_version,
@@ -328,6 +365,9 @@ fn map_admin_client_row(row: AdminClientRowRaw) -> AdminClientRecord {
         traffic_used_down: row.traffic_used_down,
         traffic_cycle_start: row.traffic_cycle_start,
         traffic_reset_mode: row.traffic_reset_mode,
+        last_net_total_up: row.last_net_total_up,
+        last_net_total_down: row.last_net_total_down,
+        last_uptime_secs: row.last_uptime_secs,
         bandwidth: row.bandwidth,
         bandwidth_unit: row.bandwidth_unit,
     }
@@ -417,11 +457,13 @@ impl<'a> ClientRepository<'a> {
     /// All clients with fields needed for public theme RPC.
     pub async fn list_for_public_api(&self) -> DbResult<Vec<PublicClientRow>> {
         let rows: Vec<PublicClientRowRaw> = sqlx::query_as(
-            "SELECT uuid, name, online, disabled, ipv4, ipv6, agent_version,
+            "SELECT uuid, name, online, disabled, ipv4, ipv6, region, region6,
+                    agent_version,
                     group_name, private_remark, price, billing_cycle, currency,
                     expired_at, created_at, updated_at, basic_info_json,
                     auto_renewal, traffic_threshold, traffic_stat_mode,
                     traffic_used_up, traffic_used_down, traffic_reset_mode,
+                    last_net_total_up, last_net_total_down, last_uptime_secs,
                     bandwidth, bandwidth_unit
              FROM clients
              ORDER BY sort_order ASC, created_at ASC, uuid ASC",
@@ -437,6 +479,8 @@ impl<'a> ClientRepository<'a> {
                 disabled: row.disabled != 0,
                 ipv4: row.ipv4,
                 ipv6: row.ipv6,
+                region: row.region,
+                region6: row.region6,
                 agent_version: row.agent_version,
                 group_name: row.group_name,
                 private_remark: row.private_remark,
@@ -453,6 +497,9 @@ impl<'a> ClientRepository<'a> {
                 traffic_used_up: row.traffic_used_up,
                 traffic_used_down: row.traffic_used_down,
                 traffic_reset_mode: row.traffic_reset_mode,
+                last_net_total_up: row.last_net_total_up,
+                last_net_total_down: row.last_net_total_down,
+                last_uptime_secs: row.last_uptime_secs,
                 bandwidth: row.bandwidth,
                 bandwidth_unit: row.bandwidth_unit,
             })
@@ -496,12 +543,14 @@ impl<'a> ClientRepository<'a> {
             cursor.and_then(decode_admin_list_cursor)
         {
             sqlx::query_as(
-                "SELECT uuid, name, token, online, disabled, ipv4, ipv6, agent_version,
+                "SELECT uuid, name, token, online, disabled, ipv4, ipv6, region, region6,
+                        agent_version,
                         group_name, private_remark, price, billing_cycle, currency,
                         expired_at, last_seen_at, created_at, basic_info_json,
                         auto_renewal, traffic_threshold, traffic_stat_mode,
                         traffic_used_up, traffic_used_down, traffic_cycle_start,
-                        traffic_reset_mode, bandwidth, bandwidth_unit, sort_order
+                        traffic_reset_mode, last_net_total_up, last_net_total_down,
+                        last_uptime_secs, bandwidth, bandwidth_unit, sort_order
                  FROM clients
                  WHERE sort_order > ?1
                     OR (sort_order = ?1 AND created_at > ?2)
@@ -517,12 +566,14 @@ impl<'a> ClientRepository<'a> {
             .await?
         } else {
             sqlx::query_as(
-                "SELECT uuid, name, token, online, disabled, ipv4, ipv6, agent_version,
+                "SELECT uuid, name, token, online, disabled, ipv4, ipv6, region, region6,
+                        agent_version,
                         group_name, private_remark, price, billing_cycle, currency,
                         expired_at, last_seen_at, created_at, basic_info_json,
                         auto_renewal, traffic_threshold, traffic_stat_mode,
                         traffic_used_up, traffic_used_down, traffic_cycle_start,
-                        traffic_reset_mode, bandwidth, bandwidth_unit, sort_order
+                        traffic_reset_mode, last_net_total_up, last_net_total_down,
+                        last_uptime_secs, bandwidth, bandwidth_unit, sort_order
                  FROM clients
                  ORDER BY sort_order ASC, created_at ASC, uuid ASC
                  LIMIT ?1",
@@ -1031,10 +1082,107 @@ impl<'a> ClientRepository<'a> {
         sqlx::query("UPDATE clients SET online = ?1, updated_at = ?2 WHERE uuid = ?3")
             .bind(if online { 1i64 } else { 0 })
             .bind(now)
-            .bind(uuid)
-            .execute(self.pool)
-            .await?;
+        .bind(uuid)
+        .execute(self.pool)
+        .await?;
         Ok(())
+    }
+
+    /// Persists the latest reported cumulative traffic and uptime so the
+    /// dashboard can still show them after a board restart.
+    /// 保存最近上报的累计流量与运行时长，面板重启后仍可展示断开前的最后数据。
+    pub async fn update_last_runtime(
+        &self,
+        uuid: &str,
+        net_total_up: u64,
+        net_total_down: u64,
+        uptime_secs: u64,
+    ) -> DbResult<()> {
+        sqlx::query(
+            "UPDATE clients SET last_net_total_up = ?1, last_net_total_down = ?2, \
+             last_uptime_secs = ?3 WHERE uuid = ?4",
+        )
+        .bind(net_total_up as i64)
+        .bind(net_total_down as i64)
+        .bind(uptime_secs as i64)
+        .bind(uuid)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Persists resolved geolocation country codes. `None` leaves the
+    /// corresponding column untouched; callers pass `None` for failed or
+    /// negative-cached lookups so previous values survive.
+    /// 持久化解析出的归属地国家代码。`None` 表示该列不动；
+    /// 解析失败 / 负缓存时调用方传 `None`，保留旧值。
+    pub async fn update_geo_regions(
+        &self,
+        uuid: &str,
+        region: Option<&str>,
+        region6: Option<&str>,
+    ) -> DbResult<()> {
+        match (region, region6) {
+            (Some(v4), Some(v6)) => {
+                sqlx::query("UPDATE clients SET region = ?1, region6 = ?2 WHERE uuid = ?3")
+                    .bind(v4)
+                    .bind(v6)
+                    .bind(uuid)
+                    .execute(self.pool)
+                    .await?;
+            }
+            (Some(v4), None) => {
+                sqlx::query("UPDATE clients SET region = ?1 WHERE uuid = ?2")
+                    .bind(v4)
+                    .bind(uuid)
+                    .execute(self.pool)
+                    .await?;
+            }
+            (None, Some(v6)) => {
+                sqlx::query("UPDATE clients SET region6 = ?1 WHERE uuid = ?2")
+                    .bind(v6)
+                    .bind(uuid)
+                    .execute(self.pool)
+                    .await?;
+            }
+            (None, None) => {}
+        }
+        Ok(())
+    }
+
+    /// Clears the online flag for every client. Called once at board startup,
+    /// because no websocket session can exist before the process boots.
+    /// 在面板启动时清除所有在线标记（进程启动前不可能存在任何活跃会话）。
+    pub async fn set_all_offline(&self) -> DbResult<Vec<String>> {
+        let now = Utc::now().to_rfc3339();
+        let rows = sqlx::query_scalar::<_, String>(
+            "UPDATE clients SET online = 0, updated_at = ?1 \
+             WHERE online = 1 RETURNING uuid",
+        )
+        .bind(now)
+        .fetch_all(self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Marks clients whose online flag is set but whose last heartbeat is
+    /// older than `stale_secs` as offline. Returns the affected uuids so the
+    /// caller can clean in-memory presence/snapshot state too.
+    /// 兜底下线：online 仍为 1 但 last_seen_at 超过阈值的客户端置离线，
+    /// 返回受影响的 uuid 列表供调用方同步清理内存状态。
+    pub async fn mark_stale_offline(&self, stale_secs: i64) -> DbResult<Vec<String>> {
+        let now = Utc::now().to_rfc3339();
+        let cutoff = (Utc::now() - chrono::Duration::seconds(stale_secs)).to_rfc3339();
+        let rows = sqlx::query_scalar::<_, String>(
+            "UPDATE clients SET online = 0, updated_at = ?1 \
+             WHERE online = 1 AND last_seen_at IS NOT NULL AND last_seen_at < ?2 \
+             RETURNING uuid",
+        )
+        .bind(now)
+        .bind(cutoff)
+        .fetch_all(self.pool)
+        .await?;
+        Ok(rows)
     }
 }
 
