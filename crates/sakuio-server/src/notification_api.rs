@@ -72,31 +72,6 @@ pub struct TestInstanceBody {
     pub to_email: Option<String>,
 }
 
-#[derive(Serialize)]
-pub struct RuleSummary {
-    pub id: String,
-    pub name: String,
-    pub event_type: String,
-    pub threshold: i64,
-    pub channels: Vec<String>,
-    pub clients: Vec<String>,
-    pub template_title: String,
-    pub template_body: String,
-}
-
-#[derive(Serialize)]
-pub struct RuleDetailResponse {
-    pub id: String,
-    pub name: String,
-    pub event_type: String,
-    pub threshold: i64,
-    pub channels: Vec<String>,
-    pub clients: Vec<String>,
-    pub template_title: String,
-    pub template_body: String,
-    pub updated_at: String,
-}
-
 #[derive(Deserialize)]
 pub struct CreateRuleBody {
     pub name: String,

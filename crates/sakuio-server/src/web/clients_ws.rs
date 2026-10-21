@@ -1,7 +1,7 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use sakuio_board::BoardStateStore;
 use serde_json::json;
 

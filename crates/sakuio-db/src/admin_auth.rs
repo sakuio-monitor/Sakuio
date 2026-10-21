@@ -1,8 +1,6 @@
 use crate::{DbError, DbResult};
-use argon2::{
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
-};
+use argon2::password_hash::{PasswordHash, PasswordVerifier};
+use argon2::Argon2;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -283,12 +281,4 @@ pub fn guest_me_json() -> serde_json::Value {
         "logged_in": false,
         "2fa_enabled": false,
     })
-}
-
-pub fn hash_password_install(password: &str) -> DbResult<String> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|h| h.to_string())
-        .map_err(|e| DbError::Message(e.to_string()))
 }

@@ -239,7 +239,7 @@ pub async fn common_get_nodes_latest_status(
         let ping = ping_stats_for_node(&state.db, &row.uuid)
             .await
             .unwrap_or_else(|_| json!({}));
-        let mut status = node_status_json(&row.uuid, snap.as_ref(), row.online);
+        let mut status = node_status_json(&row, snap.as_ref());
         if let Some(obj) = status.as_object_mut() {
             obj.insert("ping".into(), ping);
         }
@@ -255,13 +255,13 @@ pub async fn common_get_nodes_latest_status(
 }
 
 pub fn node_status_json(
-    uuid: &str,
+    row: &sakuio_db::PublicClientRow,
     snap: Option<&sakuio_board::RuntimeSnapshot>,
-    db_online: bool,
 ) -> Value {
     let Some(snap) = snap else {
-        return offline_status(uuid, db_online);
+        return offline_status(row);
     };
+    let uuid = row.uuid.as_str();
     let time = Utc
         .timestamp_millis_opt(snap.observed_at_ms)
         .single()
@@ -271,7 +271,7 @@ pub fn node_status_json(
     let online = if snap.observed_at_ms > 0 {
         snap.online
     } else {
-        db_online
+        row.online
     };
     let tcp = snap.connections_tcp.unwrap_or(0);
     let udp = snap.connections_udp.unwrap_or(0);
@@ -302,9 +302,14 @@ pub fn node_status_json(
     })
 }
 
-fn offline_status(uuid: &str, online: bool) -> Value {
+fn offline_status(row: &sakuio_db::PublicClientRow) -> Value {
+    // Live gauges (cpu / ram / rates) are zeroed, but cumulative counters and
+    // uptime fall back to the last values persisted from telemetry, so a
+    // board restart no longer wipes the node's totals.
+    // 实时指标清零，但累计流量与运行时长回退到遥测持久化的最后值，
+    // 面板重启不再把总流量清零。
     json!({
-        "client": uuid,
+        "client": row.uuid,
         "time": Utc::now().to_rfc3339(),
         "cpu": 0.0,
         "gpu": 0.0,
@@ -320,13 +325,13 @@ fn offline_status(uuid: &str, online: bool) -> Value {
         "disk_total": 0,
         "net_in": 0,
         "net_out": 0,
-        "net_total_up": 0,
-        "net_total_down": 0,
+        "net_total_up": row.last_net_total_up.unwrap_or(0),
+        "net_total_down": row.last_net_total_down.unwrap_or(0),
         "process": 0,
         "connections": 0,
         "connections_udp": 0,
-        "online": online,
-        "uptime": 0,
+        "online": row.online,
+        "uptime": row.last_uptime_secs.unwrap_or(0),
         "ping": {},
     })
 }
@@ -384,17 +389,6 @@ pub fn v2_report_from_snapshot(
         "message": "",
         "updated_at": updated_at,
     })
-}
-
-pub fn empty_records(params: Option<&Value>) -> Value {
-    let record_type = params
-        .and_then(|p| p.get("type"))
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
-    match record_type {
-        "ping" => json!({ "records": [], "tasks": [], "basic_info": [] }),
-        _ => json!({ "records": [] }),
-    }
 }
 
 pub fn param_uuid(params: Option<&Value>) -> Option<String> {

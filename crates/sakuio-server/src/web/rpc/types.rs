@@ -2,7 +2,6 @@ use serde::Deserialize;
 use serde_json::Value;
 
 pub const RPC_VERSION: &str = "2.0";
-pub const PERMISSION_DENIED: i32 = -32041;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonRpcRequest {

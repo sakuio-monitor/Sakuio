@@ -208,8 +208,6 @@ async fn tick_billing(state: &AppState, watcher: &Mutex<WatcherState>) -> Result
         // ---- 3. Per-client threshold alerts (80% / 100%) ----
         if row.traffic_threshold > 0 {
             let mode = row.traffic_stat_mode.as_str();
-            let prev_total =
-                sakuio_db::traffic_used_by_mode(row.traffic_used_up, row.traffic_used_down, mode);
             let total = sakuio_db::traffic_used_by_mode(used_up, used_down, mode);
             let warn_at = row.traffic_threshold / 5 * 4;
             let level = if total >= row.traffic_threshold {

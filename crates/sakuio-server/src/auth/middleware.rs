@@ -102,23 +102,3 @@ pub async fn admin_auth_layer(
         Err(status) => status.into_response(),
     }
 }
-
-pub fn sensitive_2fa_code_from_parts(parts: &Parts) -> Option<String> {
-    parts
-        .headers
-        .get("x-2fa-code")
-        .or_else(|| parts.headers.get("x-two-factor-code"))
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            parts.uri.query().and_then(|q| {
-                for pair in q.split('&') {
-                    let (k, v) = pair.split_once('=')?;
-                    if k == "two_factor_code" || k == "2fa_code" {
-                        return Some(v.to_string());
-                    }
-                }
-                None
-            })
-        })
-}

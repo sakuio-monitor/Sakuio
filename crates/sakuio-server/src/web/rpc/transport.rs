@@ -3,7 +3,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::AppState;

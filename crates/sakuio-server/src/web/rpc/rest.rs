@@ -31,13 +31,6 @@ async fn bind_standard(
     }
 }
 
-pub async fn api_me(State(state): State<AppState>) -> impl IntoResponse {
-    match dispatch(&state, "public:getMe", None).await {
-        Ok(v) => axum::Json(v).into_response(),
-        Err((code, msg)) => api_error(rpc_http_status(code), msg),
-    }
-}
-
 pub async fn api_public(state: State<AppState>) -> impl IntoResponse {
     bind_standard(state, "public:getPublicSettings", Value::Null).await
 }
