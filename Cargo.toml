@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sakuio-protocol",
+    "crates/sakuio-board",
+    "crates/sakuio-db",
+    "crates/sakuio-core",
+    "crates/sakuio-metric",
+    "crates/sakuio-transport-ws",
+    "crates/sakuio-server",
+    "crates/sakuio-notify",
+]
+default-members = ["crates/sakuio-server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Sakuio Contributors"]
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.7", features = ["ws", "macros"] }
+bytes = "1"
+cbor4ii = { version = "1", features = ["serde1", "use_std"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "mysql", "chrono", "uuid", "derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+rand = "0.8"
+hex = "0.4"
+argon2 = "0.5"
+password-hash = "0.5"
+
+sakuio-protocol = { path = "crates/sakuio-protocol" }
+sakuio-board = { path = "crates/sakuio-board" }
+sakuio-db = { path = "crates/sakuio-db" }
+sakuio-core = { path = "crates/sakuio-core" }
+sakuio-metric = { path = "crates/sakuio-metric" }
+sakuio-transport-ws = { path = "crates/sakuio-transport-ws" }
+sakuio-notify = { path = "crates/sakuio-notify" }

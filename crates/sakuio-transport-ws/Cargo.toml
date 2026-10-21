@@ -1,0 +1,21 @@
+[package]
+name = "sakuio-transport-ws"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+sakuio-board.workspace = true
+sakuio-core.workspace = true
+sakuio-db.workspace = true
+sakuio-protocol.workspace = true
+cbor4ii = { workspace = true }
+serde.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true

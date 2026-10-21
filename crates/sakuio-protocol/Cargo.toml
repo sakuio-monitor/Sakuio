@@ -1,0 +1,15 @@
+[package]
+name = "sakuio-protocol"
+description = "SakuLink control messages and SKTL telemetry framing"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bytes.workspace = true
+cbor4ii.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

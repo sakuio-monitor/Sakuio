@@ -1,0 +1,34 @@
+[package]
+name = "sakuio-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "sakuio-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+axum-extra = { version = "0.9", features = ["cookie"] }
+cookie = "0.18"
+uuid.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+sakuio-board.workspace = true
+sakuio-protocol.workspace = true
+sakuio-core.workspace = true
+sakuio-db.workspace = true
+sakuio-metric.workspace = true
+sakuio-transport-ws.workspace = true
+sakuio-notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

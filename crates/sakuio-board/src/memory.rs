@@ -1,0 +1,165 @@
+use crate::state::{
+    BoardStateStore, CommandCursor, CommandEnvelope, Presence, RuntimeSnapshot, StateError,
+    RECENT_TELEMETRY_MS,
+};
+use sakuio_protocol::TelemetrySample;
+use async_trait::async_trait;
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::sync::RwLock;
+
+#[derive(Default)]
+struct NodeState {
+    presence: Option<Presence>,
+    commands: Vec<CommandEnvelope>,
+    next_cursor: u64,
+    snapshot: Option<RuntimeSnapshot>,
+    recent: Vec<TelemetrySample>,
+}
+
+/// In-process board state used when Redis is disabled.
+/// 未启用 Redis 时使用的进程内板级状态。
+#[derive(Clone, Default)]
+pub struct MemoryBoardStore {
+    inner: Arc<RwLock<HashMap<String, NodeState>>>,
+}
+
+#[async_trait]
+impl BoardStateStore for MemoryBoardStore {
+    async fn upsert_presence(
+        &self,
+        node_uuid: &str,
+        instance_id: &str,
+        session_id: &str,
+    ) -> Result<(), StateError> {
+        let mut guard = self.inner.write().await;
+        let entry = guard.entry(node_uuid.to_string()).or_default();
+        entry.presence = Some(Presence {
+            node_uuid: node_uuid.to_string(),
+            instance_id: instance_id.to_string(),
+            session_id: session_id.to_string(),
+        });
+        Ok(())
+    }
+
+    async fn clear_presence(&self, node_uuid: &str, session_id: &str) -> Result<(), StateError> {
+        let mut guard = self.inner.write().await;
+        if let Some(entry) = guard.get_mut(node_uuid) {
+            if entry
+                .presence
+                .as_ref()
+                .is_some_and(|p| p.session_id == session_id)
+            {
+                entry.presence = None;
+            }
+        }
+        Ok(())
+    }
+
+    async fn resolve_presence(&self, node_uuid: &str) -> Result<Option<Presence>, StateError> {
+        let guard = self.inner.read().await;
+        Ok(guard.get(node_uuid).and_then(|n| n.presence.clone()))
+    }
+
+    async fn enqueue_command(
+        &self,
+        node_uuid: &str,
+        method: &str,
+        payload: serde_json::Value,
+    ) -> Result<CommandEnvelope, StateError> {
+        let mut guard = self.inner.write().await;
+        let entry = guard.entry(node_uuid.to_string()).or_default();
+        entry.next_cursor += 1;
+        let env = CommandEnvelope {
+            cursor: CommandCursor(entry.next_cursor),
+            method: method.to_string(),
+            payload,
+        };
+        entry.commands.push(env.clone());
+        Ok(env)
+    }
+
+    async fn read_commands(
+        &self,
+        node_uuid: &str,
+        since: CommandCursor,
+        limit: u32,
+    ) -> Result<Vec<CommandEnvelope>, StateError> {
+        let guard = self.inner.read().await;
+        let Some(entry) = guard.get(node_uuid) else {
+            return Ok(Vec::new());
+        };
+        let out: Vec<_> = entry
+            .commands
+            .iter()
+            .filter(|c| c.cursor.0 > since.0)
+            .take(limit as usize)
+            .cloned()
+            .collect();
+        Ok(out)
+    }
+
+    async fn put_latest_snapshot(
+        &self,
+        node_uuid: &str,
+        snap: RuntimeSnapshot,
+        _ttl: Duration,
+    ) -> Result<(), StateError> {
+        let mut guard = self.inner.write().await;
+        let entry = guard.entry(node_uuid.to_string()).or_default();
+        entry.snapshot = Some(snap);
+        Ok(())
+    }
+
+    async fn get_latest_snapshot(
+        &self,
+        node_uuid: &str,
+    ) -> Result<Option<RuntimeSnapshot>, StateError> {
+        let guard = self.inner.read().await;
+        Ok(guard.get(node_uuid).and_then(|n| n.snapshot.clone()))
+    }
+
+    async fn append_recent_telemetry(
+        &self,
+        node_uuid: &str,
+        samples: &[TelemetrySample],
+    ) -> Result<(), StateError> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        let cutoff = chrono::Utc::now().timestamp_millis() - RECENT_TELEMETRY_MS;
+        let mut guard = self.inner.write().await;
+        let entry = guard.entry(node_uuid.to_string()).or_default();
+        for sample in samples {
+            if sample.observed_at_ms < cutoff {
+                continue;
+            }
+            let pos = entry
+                .recent
+                .partition_point(|s| s.observed_at_ms < sample.observed_at_ms);
+            entry.recent.insert(pos, sample.clone());
+        }
+        entry.recent.retain(|s| s.observed_at_ms >= cutoff);
+        Ok(())
+    }
+
+    async fn list_recent_telemetry(
+        &self,
+        node_uuid: &str,
+        since_ms: i64,
+    ) -> Result<Vec<TelemetrySample>, StateError> {
+        let guard = self.inner.read().await;
+        let Some(entry) = guard.get(node_uuid) else {
+            return Ok(Vec::new());
+        };
+        Ok(entry
+            .recent
+            .iter()
+            .filter(|s| s.observed_at_ms >= since_ms)
+            .cloned()
+            .collect())
+    }
+}

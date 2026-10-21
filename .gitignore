@@ -1,0 +1,36 @@
+# ---- Rust / Cargo ----
+/target
+**/target/
+**/*.rs.bk
+
+# ---- 本地文档（含竞品对标说明，不入库）----
+/docs/DESIGN.md
+
+# ---- 运行时数据（数据库、上传的主题包、GeoIP 库等）----
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# ---- 环境与密钥 ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ---- 日志与临时文件 ----
+*.log
+*.tmp
+*.bak
+
+# ---- 系统与编辑器 ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

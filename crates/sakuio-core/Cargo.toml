@@ -1,0 +1,21 @@
+[package]
+name = "sakuio-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+sakuio-board.workspace = true
+sakuio-db.workspace = true
+sakuio-metric.workspace = true
+sakuio-protocol.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+futures-util.workspace = true
