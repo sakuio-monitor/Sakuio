@@ -68,7 +68,7 @@ git tag vx.y.z && git push origin vx.y.z
 **一键安装命令约定**（管理端「添加服务器」实时生成）：
 
 ```
-curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio-agent/refs/heads/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio-agent/main/install.sh \
   | sudo bash -s -- -e <端点> -t <token> [安装选项...]
 ```
 
