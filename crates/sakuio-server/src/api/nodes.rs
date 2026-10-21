@@ -16,6 +16,8 @@ use std::time::Duration;
 pub struct AddClientBody {
     #[serde(default)]
     pub name: String,
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -178,8 +180,7 @@ pub async fn add_client(
     let repo = ClientRepository::new(&state.db);
     match repo.insert(&NewClient {
         name: body.name.clone(),
-    })
-    .await
+        token: body.token,
     {
         Ok((uuid, token)) => {
             let ping_repo = PingRepository::new(&state.db);

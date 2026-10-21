@@ -112,7 +112,10 @@ async fn auto_register(state: &AppState, ip: &str) -> Result<(String, String), S
     }
     let repo = ClientRepository::new(&state.db);
     let (uuid, token) = repo
-        .insert(&sakuio_db::NewClient { name: String::new() })
+        .insert(&sakuio_db::NewClient {
+            name: String::new(),
+            token: None,
+        })
         .await
         .map_err(|e| e.to_string())?;
     {

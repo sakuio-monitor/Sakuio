@@ -32,6 +32,10 @@ pub struct AdminClientRecord {
     pub name: String,
     pub online: bool,
     pub disabled: bool,
+    /// Agent bearer token (admin-only, used to render the install command).
+    /// Agent 令牌（仅管理端，用于渲染安装命令）。
+    #[serde(default)]
+    pub token: String,
     #[serde(default)]
     pub region: String,
     /// Country code resolved from the node's IPv6 ("" unknown).
@@ -265,6 +269,7 @@ struct PublicClientRowRaw {
 struct AdminClientRowRaw {
     uuid: String,
     name: String,
+    token: String,
     online: i64,
     disabled: i64,
     ipv4: String,
@@ -295,6 +300,7 @@ fn map_admin_client_row(row: AdminClientRowRaw) -> AdminClientRecord {
     AdminClientRecord {
         uuid: row.uuid,
         name: row.name,
+        token: row.token,
         online: row.online != 0,
         disabled: row.disabled != 0,
         region: String::new(),
@@ -349,6 +355,9 @@ pub struct AdminClientPatch {
 #[derive(Debug, Clone)]
 pub struct NewClient {
     pub name: String,
+    /// Optional client-supplied token (64 hex chars, unique); generated when absent.
+    /// 可选的客户端预生成 token（64 位十六进制、唯一）；缺省时由服务端生成。
+    pub token: Option<String>,
 }
 
 /// CRUD helpers for the `clients` table.
@@ -487,7 +496,7 @@ impl<'a> ClientRepository<'a> {
             cursor.and_then(decode_admin_list_cursor)
         {
             sqlx::query_as(
-                "SELECT uuid, name, online, disabled, ipv4, ipv6, agent_version,
+                "SELECT uuid, name, token, online, disabled, ipv4, ipv6, agent_version,
                         group_name, private_remark, price, billing_cycle, currency,
                         expired_at, last_seen_at, created_at, basic_info_json,
                         auto_renewal, traffic_threshold, traffic_stat_mode,
@@ -500,7 +509,7 @@ impl<'a> ClientRepository<'a> {
                  ORDER BY sort_order ASC, created_at ASC, uuid ASC
                  LIMIT ?4",
             )
-            .bind(after_sort.unwrap_or(f64::MIN))
+            .bind(after_sort)
             .bind(after_created)
             .bind(after_uuid)
             .bind(fetch_limit)
@@ -508,7 +517,7 @@ impl<'a> ClientRepository<'a> {
             .await?
         } else {
             sqlx::query_as(
-                "SELECT uuid, name, online, disabled, ipv4, ipv6, agent_version,
+                "SELECT uuid, name, token, online, disabled, ipv4, ipv6, agent_version,
                         group_name, private_remark, price, billing_cycle, currency,
                         expired_at, last_seen_at, created_at, basic_info_json,
                         auto_renewal, traffic_threshold, traffic_stat_mode,
@@ -1054,4 +1063,3 @@ fn generate_token() -> String {
     let mut bytes = [0u8; 32];
     thread_rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
-}
