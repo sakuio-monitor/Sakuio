@@ -44,8 +44,8 @@ Sakuio-frontend（前端）
 
    说明：
    - Linux gnu 系目标全部走 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
-     （zig 交叉编译，无需目标平台系统库；zig 版本锁定 `0.14.1`，
-     `0.17` 仍是预发布版无正式包）。
+     （zig 交叉编译，无需目标平台系统库）。zig 从官方归档直装
+     `0.15.2`（实测可用；`setup-zig` 镜像不稳、builds 目录只留最新版）。
    - **MIPS 暂不提供**：Rust 上游已移除 mips 预编译 std
      （新版 rustup 对旧通道也拒绝下载），且 zig 不支持 MIPS。后续如需
      mips/mipsel，可评估 nightly `-Z build-std` 自行编标准库的方案。
