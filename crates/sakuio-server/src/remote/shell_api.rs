@@ -40,7 +40,7 @@ async fn shell_session(
         _ => return,
     };
 
-    let relay = build_relay_spec(&relay_id, &token, &state.relay_public_host);
+    let relay = build_relay_spec(&relay_id, &token);
     let open = RemoteShellOpen {
         relay,
         cols: q.cols.unwrap_or(120),

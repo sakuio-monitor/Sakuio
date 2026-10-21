@@ -1,7 +1,7 @@
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::Json;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -44,8 +44,6 @@ impl ExecStreamRegistry {
 pub struct ExecRequest {
     pub command: String,
     pub clients: Vec<String>,
-    #[serde(default, rename = "2fa_code")]
-    pub two_fa_code: Option<String>,
 }
 
 pub async fn exec_task(
@@ -92,7 +90,7 @@ pub async fn exec_task(
             .await;
 
         let open = RemoteExecOpen {
-            relay: build_relay_spec(&relay_id, &token, &state.relay_public_host),
+            relay: build_relay_spec(&relay_id, &token),
             command: command.to_string(),
             task_id: task_id.clone(),
             client_uuid: uuid.clone(),

@@ -10,10 +10,11 @@ pub use shell_api::shell_ws;
 
 use sakuio_protocol::BoardRelaySpec;
 
-pub fn build_relay_spec(relay_id: &str, node_token: &str, host: &str) -> BoardRelaySpec {
+pub fn build_relay_spec(relay_id: &str, node_token: &str) -> BoardRelaySpec {
     BoardRelaySpec {
         relay_id: relay_id.to_string(),
-        path: format!("ws://{host}/api/agent/relay/{relay_id}"),
+        // 相对路径；agent 以自身 endpoint 的 scheme/host/port 拼接。
+        path: format!("/api/agent/relay/{relay_id}"),
         token: node_token.to_string(),
     }
 }

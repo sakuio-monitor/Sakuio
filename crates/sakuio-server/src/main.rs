@@ -5,6 +5,7 @@ mod geoip_resolver;
 mod logging;
 mod notification_api;
 mod ping_scheduler;
+mod presence_watcher;
 mod relay;
 mod remote;
 mod site_settings;
@@ -39,8 +40,6 @@ pub struct AppState {
     pub ping_scheduler: Arc<PingScheduler>,
     pub remote: Arc<RemoteHub>,
     pub relay: RelayBroker,
-    /// Host:port agents use to open relay WebSockets (set `SAKUIO_RELAY_PUBLIC_HOST`).
-    pub relay_public_host: String,
     pub exec_streams: remote::ExecStreamRegistry,
     pub notify: Registry,
     pub link: WsLinkState,
@@ -91,9 +90,6 @@ async fn main() -> anyhow::Result<()> {
     }
     ping_scheduler.reload().await;
 
-    let relay_public_host = std::env::var("SAKUIO_RELAY_PUBLIC_HOST")
-        .unwrap_or_else(|_| "127.0.0.1:8080".into());
-
     let notify = notification_api::init_notify_registry().await;
 
     let app_state = AppState {
@@ -104,7 +100,6 @@ async fn main() -> anyhow::Result<()> {
         ping_scheduler,
         remote,
         relay,
-        relay_public_host,
         exec_streams: remote::ExecStreamRegistry::default(),
         notify,
         link,
@@ -113,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
     notification_api::spawn_notification_watcher(app_state.clone());
     geoip_resolver::spawn_geoip_resolver(app_state.clone());
     billing_watcher::spawn_billing_watcher(app_state.clone());
+    presence_watcher::spawn_presence_watcher(app_state.clone()).await;
     site_settings::bootstrap_defaults(&app_state).await;
 
     let admin_protected = remote::fs_routes()

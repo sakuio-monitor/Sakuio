@@ -302,7 +302,7 @@ async fn fs_download(
     let token = node_token(&state, &uuid).await?;
     let relay_id = Uuid::new_v4().to_string();
     state.relay.register(relay_id.clone()).await;
-    let relay = build_relay_spec(&relay_id, &token, &state.relay_public_host);
+    let relay = build_relay_spec(&relay_id, &token);
     let rx = state.relay.open_client_download(&relay_id).await;
     state
         .remote
@@ -353,7 +353,7 @@ async fn fs_upload(
     let relay_id = Uuid::new_v4().to_string();
     state.relay.register(relay_id.clone()).await;
     let feed_tx = state.relay.bind_upload_feed(&relay_id).await;
-    let relay = build_relay_spec(&relay_id, &token, &state.relay_public_host);
+    let relay = build_relay_spec(&relay_id, &token);
     state
         .remote
         .push_stream_write(
