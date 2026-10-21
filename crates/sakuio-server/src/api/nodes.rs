@@ -181,6 +181,8 @@ pub async fn add_client(
     match repo.insert(&NewClient {
         name: body.name.clone(),
         token: body.token,
+    })
+    .await
     {
         Ok((uuid, token)) => {
             let ping_repo = PingRepository::new(&state.db);
