@@ -107,7 +107,7 @@ CI 中访问。
 | windows i686 | `sakuio-server-windows-386.exe` |
 | windows arm64 | `sakuio-server-windows-arm64.exe` |
 
-同一 Release 还包含管理端构建产物和 `sakuio-theme-<tag>.zip`；服务端以
+同一 Release 还包含管理端构建产物和 `frontend.zip`；服务端以
 `embedded-admin` feature 嵌入管理端静态文件，安装脚本下载主题包到
 `/opt/sakuio/data/theme/SakuioTheme`。
 

@@ -40,13 +40,13 @@ jobs:
         shell: bash
         run: |
           THEME_ZIP="$(ls frontend/apps/public/sakuio-theme-build-*.zip | head -1)"
-          cp "$THEME_ZIP" "sakuio-theme-${GITHUB_REF_NAME}.zip"
+          cp "$THEME_ZIP" frontend.zip
       - uses: actions/upload-artifact@v4
         with:
           name: frontend-bundle
           path: |
             frontend/apps/admin/dist
-            sakuio-theme-*.zip
+            frontend.zip
           if-no-files-found: error
 
   build:

@@ -183,7 +183,7 @@ fi
 # ---- default theme ---------------------------------------------------------
 # The public theme is published as a separate release asset. It is unpacked
 # before the server starts so the first initialization can activate it.
-THEME_ASSET="sakuio-theme-${VERSION}.zip"
+THEME_ASSET="frontend.zip"
 THEME_URL="${BASE}/${THEME_ASSET}"
 THEME_DIR="$INSTALL_DIR/data/theme/SakuioTheme"
 THEME_TMP="$(mktemp)"
