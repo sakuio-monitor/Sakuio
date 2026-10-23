@@ -1,7 +1,7 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::IntoResponse;
-use futures_util::StreamExt;
+use axum::response::{IntoResponse, Sse, sse::{Event, KeepAlive}};
+use futures_util::{StreamExt, stream};
 use sakuio_board::BoardStateStore;
 use serde_json::json;
 
@@ -70,7 +70,7 @@ fn parse_clients_ws_message(text: &str) -> Result<Option<String>, ()> {
     Err(())
 }
 
-async fn build_clients_ws_payload(
+pub(crate) async fn build_clients_ws_payload(
     state: &AppState,
     filter_uuid: Option<&str>,
 ) -> Result<serde_json::Value, i32> {
@@ -121,4 +121,23 @@ async fn build_clients_ws_payload(
             "data": data,
         }
     }))
+}
+
+
+/// GET `/api/clients/sse` — realtime SSE stream using the same payload as
+/// the compatibility WebSocket. Existing APIs are unchanged.
+pub async fn clients_sse(
+    State(state): State<AppState>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let stream = stream::unfold(state, |state| async move {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let payload = build_clients_ws_payload(&state, None)
+            .await
+            .unwrap_or_else(|_| json!({ "status": "error", "error": "Internal error" }));
+        Some((
+            Ok(Event::default().event("nodes").data(payload.to_string())),
+            state,
+        ))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
