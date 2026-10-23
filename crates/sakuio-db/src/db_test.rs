@@ -1,7 +1,5 @@
-use crate::{AppDatabase, DbError, DbResult};
+use crate::{canonical_driver, AppDatabase, DbError, DbKind, DbResult};
 use serde::Deserialize;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::mysql::MySqlPoolOptions;
 
 /// POST `/api/install/test-db` body.
 /// POST `/api/install/test-db` 请求体。
@@ -19,40 +17,25 @@ pub async fn test_config_database(req: &TestDbRequest) -> DbResult<()> {
     if dsn.is_empty() {
         return Err(DbError::Message("database dsn required".into()));
     }
-    match driver {
-        "sqlite" => {
-            AppDatabase::connect_sqlite(dsn, true).await?;
-            tracing::info!(driver, dsn, "install db test succeeded");
-            Ok(())
+    let supplied = match driver.to_ascii_lowercase().as_str() {
+        "sqlite" | "sqlite3" => "sqlite",
+        "postgresql" | "postgres" => "postgresql",
+        "mysql" | "mariadb" => "mysql",
+        _ => {
+            return Err(DbError::Message(format!(
+                "unsupported database driver: {driver}"
+            )))
         }
-        "postgresql" => {
-            let pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect(dsn)
-                .await
-                .map_err(DbError::Sqlx)?;
-            sqlx::query("SELECT 1")
-                .execute(&pool)
-                .await
-                .map_err(DbError::Sqlx)?;
-            pool.close().await;
-            tracing::info!(driver, "install db test succeeded");
-            Ok(())
-        }
-        "mysql" | "mariadb" => {
-            let pool = MySqlPoolOptions::new()
-                .max_connections(1)
-                .connect(dsn)
-                .await
-                .map_err(DbError::Sqlx)?;
-            sqlx::query("SELECT 1")
-                .execute(&pool)
-                .await
-                .map_err(DbError::Sqlx)?;
-            pool.close().await;
-            tracing::info!(driver, "install db test succeeded");
-            Ok(())
-        }
-        other => Err(DbError::Message(format!("unsupported database driver: {other}"))),
+    };
+    let kind = DbKind::detect(dsn);
+    if supplied != canonical_driver(kind) {
+        return Err(DbError::Message(format!(
+            "driver {driver} does not match DSN backend {}",
+            canonical_driver(kind)
+        )));
     }
+    let db = AppDatabase::connect(dsn, true).await?;
+    db.pool().close().await;
+    tracing::info!(driver, "install db test succeeded");
+    Ok(())
 }

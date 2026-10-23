@@ -1,3 +1,4 @@
+use crate::DbPool;
 use crate::{DbError, DbResult};
 use argon2::password_hash::{PasswordHash, PasswordVerifier};
 use argon2::Argon2;
@@ -5,7 +6,6 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
 use totp_rs::{Algorithm, Secret, TOTP};
 
 const SESSION_DAYS: i64 = 30;
@@ -25,17 +25,20 @@ pub struct AdminSessionUser {
 }
 
 pub struct AdminAuthRepository<'a> {
-    pool: &'a SqlitePool,
+    pool: &'a DbPool,
 }
 
 impl<'a> AdminAuthRepository<'a> {
-    pub fn new(pool: &'a SqlitePool) -> Self {
+    pub fn new(pool: &'a DbPool) -> Self {
         Self { pool }
     }
 
-    pub async fn find_by_username(&self, username: &str) -> DbResult<Option<(String, String, bool, Option<String>)>> {
+    pub async fn find_by_username(
+        &self,
+        username: &str,
+    ) -> DbResult<Option<(String, String, bool, Option<String>)>> {
         let row: Option<(String, String, i64, Option<String>)> = sqlx::query_as(
-            "SELECT id, password_hash, totp_enabled, totp_secret FROM admin_users WHERE username = ?1 LIMIT 1",
+            "SELECT id, password_hash, totp_enabled, totp_secret FROM admin_users WHERE username = ? LIMIT 1",
         )
         .bind(username.trim())
         .fetch_optional(self.pool)
@@ -45,7 +48,7 @@ impl<'a> AdminAuthRepository<'a> {
 
     pub async fn user_by_id(&self, id: &str) -> DbResult<Option<AdminUserRow>> {
         let row: Option<(String, String, i64)> = sqlx::query_as(
-            "SELECT id, username, totp_enabled FROM admin_users WHERE id = ?1 LIMIT 1",
+            "SELECT id, username, totp_enabled FROM admin_users WHERE id = ? LIMIT 1",
         )
         .bind(id)
         .fetch_optional(self.pool)
@@ -102,7 +105,7 @@ impl<'a> AdminAuthRepository<'a> {
         let expires = now + chrono::Duration::days(SESSION_DAYS);
         sqlx::query(
             "INSERT INTO admin_sessions (id, user_id, token_hash, expires_at, created_at, user_agent, ip_address)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(user_id)
@@ -123,23 +126,25 @@ impl<'a> AdminAuthRepository<'a> {
             "SELECT s.user_id, u.username, s.id, u.totp_enabled, u.totp_secret
              FROM admin_sessions s
              JOIN admin_users u ON u.id = s.user_id
-             WHERE s.token_hash = ?1 AND s.expires_at > ?2
+             WHERE s.token_hash = ? AND s.expires_at > ?
              LIMIT 1",
         )
         .bind(&token_hash)
         .bind(&now)
         .fetch_optional(self.pool)
         .await?;
-        Ok(row.map(|(id, username, _sid, en, secret)| AdminSessionUser {
-            id,
-            username,
-            totp_enabled: login_requires_2fa(en != 0, &secret),
-        }))
+        Ok(
+            row.map(|(id, username, _sid, en, secret)| AdminSessionUser {
+                id,
+                username,
+                totp_enabled: login_requires_2fa(en != 0, &secret),
+            }),
+        )
     }
 
     pub async fn delete_session(&self, token: &str) -> DbResult<()> {
         let token_hash = hash_token(token);
-        sqlx::query("DELETE FROM admin_sessions WHERE token_hash = ?1")
+        sqlx::query("DELETE FROM admin_sessions WHERE token_hash = ?")
             .bind(token_hash)
             .execute(self.pool)
             .await?;
@@ -148,7 +153,7 @@ impl<'a> AdminAuthRepository<'a> {
 
     pub async fn totp_secret(&self, user_id: &str) -> DbResult<Option<String>> {
         let row: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT totp_secret FROM admin_users WHERE id = ?1")
+            sqlx::query_as("SELECT totp_secret FROM admin_users WHERE id = ?")
                 .bind(user_id)
                 .fetch_optional(self.pool)
                 .await?;
@@ -156,18 +161,16 @@ impl<'a> AdminAuthRepository<'a> {
     }
 
     pub async fn set_totp_pending(&self, user_id: &str, secret: &str) -> DbResult<()> {
-        sqlx::query(
-            "UPDATE admin_users SET totp_secret = ?1, totp_enabled = 0 WHERE id = ?2",
-        )
-        .bind(secret)
-        .bind(user_id)
-        .execute(self.pool)
-        .await?;
+        sqlx::query("UPDATE admin_users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?")
+            .bind(secret)
+            .bind(user_id)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 
     pub async fn enable_totp(&self, user_id: &str) -> DbResult<()> {
-        sqlx::query("UPDATE admin_users SET totp_enabled = 1 WHERE id = ?1")
+        sqlx::query("UPDATE admin_users SET totp_enabled = 1 WHERE id = ?")
             .bind(user_id)
             .execute(self.pool)
             .await?;
@@ -175,12 +178,10 @@ impl<'a> AdminAuthRepository<'a> {
     }
 
     pub async fn disable_totp(&self, user_id: &str) -> DbResult<()> {
-        sqlx::query(
-            "UPDATE admin_users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?1",
-        )
-        .bind(user_id)
-        .execute(self.pool)
-        .await?;
+        sqlx::query("UPDATE admin_users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?")
+            .bind(user_id)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 
@@ -189,13 +190,12 @@ impl<'a> AdminAuthRepository<'a> {
         user_id: &str,
         code: Option<&str>,
     ) -> Result<(), Sensitive2faError> {
-        let row: Option<(i64, Option<String>)> = sqlx::query_as(
-            "SELECT totp_enabled, totp_secret FROM admin_users WHERE id = ?1",
-        )
-        .bind(user_id)
-        .fetch_optional(self.pool)
-        .await
-        .map_err(|_| Sensitive2faError::Internal)?;
+        let row: Option<(i64, Option<String>)> =
+            sqlx::query_as("SELECT totp_enabled, totp_secret FROM admin_users WHERE id = ?")
+                .bind(user_id)
+                .fetch_optional(self.pool)
+                .await
+                .map_err(|_| Sensitive2faError::Internal)?;
 
         let Some((enabled, secret)) = row else {
             return Err(Sensitive2faError::Unauthorized);
@@ -203,8 +203,12 @@ impl<'a> AdminAuthRepository<'a> {
         if enabled == 0 {
             return Ok(());
         }
-        let secret = secret.filter(|s| !s.is_empty()).ok_or(Sensitive2faError::Internal)?;
-        let code = code.filter(|c| !c.trim().is_empty()).ok_or(Sensitive2faError::Required)?;
+        let secret = secret
+            .filter(|s| !s.is_empty())
+            .ok_or(Sensitive2faError::Internal)?;
+        let code = code
+            .filter(|c| !c.trim().is_empty())
+            .ok_or(Sensitive2faError::Required)?;
         if !Self::verify_totp(&secret, code) {
             return Err(Sensitive2faError::Invalid);
         }
@@ -248,9 +252,7 @@ fn hash_token(token: &str) -> String {
 pub fn generate_totp_secret() -> String {
     let mut bytes = [0u8; 20];
     OsRng.fill_bytes(&mut bytes);
-    Secret::Raw(bytes.to_vec())
-        .to_encoded()
-        .to_string()
+    Secret::Raw(bytes.to_vec()).to_encoded().to_string()
 }
 
 pub fn totp_provisioning_uri(username: &str, secret_b32: &str) -> DbResult<String> {

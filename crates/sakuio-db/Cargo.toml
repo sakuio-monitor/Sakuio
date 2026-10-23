@@ -4,20 +4,25 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-build = "build.rs"
 
 [dependencies]
 anyhow.workspace = true
 argon2.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 password-hash.workspace = true
 rand.workspace = true
+sea-query.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
+sqlx-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 hex.workspace = true
 sha2 = "0.10"
 totp-rs = { version = "5", features = ["otpauth"] }
+
+[dev-dependencies]
+tokio.workspace = true

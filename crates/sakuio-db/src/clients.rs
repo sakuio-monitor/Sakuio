@@ -1,8 +1,7 @@
-use crate::{DbError, DbResult};
+use crate::{DbError, DbKind, DbPool, DbResult};
 use chrono::Utc;
+use rand::{thread_rng, RngCore};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
-use rand::{RngCore, thread_rng};
 use uuid::Uuid;
 
 /// Row returned for public node listings.
@@ -109,6 +108,14 @@ pub struct AdminClientRecord {
     /// 带宽单位符号：Kbps / Mbps / Gbps / Tbps。
     #[serde(default)]
     pub bandwidth_unit: String,
+    /// Telemetry collection/report interval in milliseconds.
+    /// 遥测采集/上报间隔（毫秒）。
+    #[serde(default = "default_report_interval_ms")]
+    pub report_interval_ms: i64,
+}
+
+fn default_report_interval_ms() -> i64 {
+    1000
 }
 
 /// One page of admin client rows plus optional next cursor.
@@ -330,6 +337,7 @@ struct AdminClientRowRaw {
     last_uptime_secs: Option<i64>,
     bandwidth: f64,
     bandwidth_unit: String,
+    report_interval_ms: i64,
     sort_order: f64,
 }
 
@@ -370,6 +378,7 @@ fn map_admin_client_row(row: AdminClientRowRaw) -> AdminClientRecord {
         last_uptime_secs: row.last_uptime_secs,
         bandwidth: row.bandwidth,
         bandwidth_unit: row.bandwidth_unit,
+        report_interval_ms: row.report_interval_ms,
     }
 }
 
@@ -389,6 +398,9 @@ pub struct AdminClientPatch {
     pub traffic_reset_mode: Option<String>,
     pub bandwidth: Option<f64>,
     pub bandwidth_unit: Option<String>,
+    /// Telemetry collection/report interval in milliseconds.
+    /// 遥测采集/上报间隔（毫秒）。
+    pub report_interval_ms: Option<i64>,
 }
 
 /// Parameters for registering a new agent client.
@@ -403,13 +415,13 @@ pub struct NewClient {
 /// CRUD helpers for the `clients` table.
 /// `clients` 表的 CRUD 辅助。
 pub struct ClientRepository<'a> {
-    pool: &'a SqlitePool,
+    pool: &'a DbPool,
 }
 
 impl<'a> ClientRepository<'a> {
     /// Creates a repository bound to the given pool.
     /// 绑定到指定连接池的仓储实例。
-    pub fn new(pool: &'a SqlitePool) -> Self {
+    pub fn new(pool: &'a DbPool) -> Self {
         Self { pool }
     }
 
@@ -417,7 +429,7 @@ impl<'a> ClientRepository<'a> {
     /// 通过 bearer token 解析节点 uuid（v1 明文存储）。
     pub async fn uuid_by_token(&self, token: &str) -> DbResult<Option<String>> {
         let row: Option<(String,)> =
-            sqlx::query_as("SELECT uuid FROM clients WHERE token = ?1 LIMIT 1")
+            sqlx::query_as("SELECT uuid FROM clients WHERE token = ? LIMIT 1")
                 .bind(token)
                 .fetch_optional(self.pool)
                 .await?;
@@ -426,7 +438,7 @@ impl<'a> ClientRepository<'a> {
 
     pub async fn token_by_uuid(&self, uuid: &str) -> DbResult<Option<String>> {
         let row: Option<(String,)> =
-            sqlx::query_as("SELECT token FROM clients WHERE uuid = ?1 LIMIT 1")
+            sqlx::query_as("SELECT token FROM clients WHERE uuid = ? LIMIT 1")
                 .bind(uuid)
                 .fetch_optional(self.pool)
                 .await?;
@@ -437,19 +449,37 @@ impl<'a> ClientRepository<'a> {
     /// 插入客户端并返回供 Agent 使用的 uuid 与 token。
     pub async fn insert(&self, new: &NewClient) -> DbResult<(String, String)> {
         let uuid = Uuid::new_v4().to_string();
-        let token = generate_token();
+        let token = new
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(generate_token);
         let name = normalize_new_client_name(&new.name, &uuid);
         let now = Utc::now().to_rfc3339();
+        // MySQL rejects reading the INSERT target from a subquery (error 1093),
+        // so compute the next sort order first in the same transaction.
+        // MySQL 禁止在 INSERT 的子查询里读取目标表（1093），
+        // 因此在同一事务里先算下一个排序值。
+        let mut tx = self.pool.begin().await?;
+        let (max_order,): (Option<f64>,) = sqlx::query_as("SELECT MAX(sort_order) FROM clients")
+            .fetch_one(&mut tx)
+            .await?;
+        let sort_order = max_order.unwrap_or(0.0) + 1.0;
         sqlx::query(
             "INSERT INTO clients (uuid, name, token, online, created_at, updated_at, sort_order)
-             VALUES (?1, ?2, ?3, 0, ?4, ?4, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM clients))",
+             VALUES (?, ?, ?, 0, ?, ?, ?)",
         )
         .bind(&uuid)
         .bind(&name)
         .bind(&token)
         .bind(&now)
-        .execute(self.pool)
+        .bind(&now)
+        .bind(sort_order)
+        .execute(&mut tx)
         .await?;
+        tx.commit().await?;
         tracing::info!(node_uuid = %uuid, "client record created");
         Ok((uuid, token))
     }
@@ -516,16 +546,18 @@ impl<'a> ClientRepository<'a> {
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(uuid, name, online, agent_version, last_seen_at)| ClientRecord {
-                uuid,
-                name,
-                online: online != 0,
-                agent_version,
-                last_seen_at,
-                cpu_usage: None,
-                mem_used: None,
-                mem_total: None,
-            })
+            .map(
+                |(uuid, name, online, agent_version, last_seen_at)| ClientRecord {
+                    uuid,
+                    name,
+                    online: online != 0,
+                    agent_version,
+                    last_seen_at,
+                    cpu_usage: None,
+                    mem_used: None,
+                    mem_total: None,
+                },
+            )
             .collect())
     }
 
@@ -550,13 +582,14 @@ impl<'a> ClientRepository<'a> {
                         auto_renewal, traffic_threshold, traffic_stat_mode,
                         traffic_used_up, traffic_used_down, traffic_cycle_start,
                         traffic_reset_mode, last_net_total_up, last_net_total_down,
-                        last_uptime_secs, bandwidth, bandwidth_unit, sort_order
+                        last_uptime_secs, bandwidth, bandwidth_unit, report_interval_ms,
+                        sort_order
                  FROM clients
-                 WHERE sort_order > ?1
-                    OR (sort_order = ?1 AND created_at > ?2)
-                    OR (sort_order = ?1 AND created_at = ?2 AND uuid > ?3)
+                 WHERE sort_order > ?
+                    OR (sort_order = ? AND created_at > ?)
+                    OR (sort_order = ? AND created_at = ? AND uuid > ?)
                  ORDER BY sort_order ASC, created_at ASC, uuid ASC
-                 LIMIT ?4",
+                 LIMIT ?",
             )
             .bind(after_sort)
             .bind(after_created)
@@ -573,10 +606,11 @@ impl<'a> ClientRepository<'a> {
                         auto_renewal, traffic_threshold, traffic_stat_mode,
                         traffic_used_up, traffic_used_down, traffic_cycle_start,
                         traffic_reset_mode, last_net_total_up, last_net_total_down,
-                        last_uptime_secs, bandwidth, bandwidth_unit, sort_order
+                        last_uptime_secs, bandwidth, bandwidth_unit, report_interval_ms,
+                        sort_order
                  FROM clients
                  ORDER BY sort_order ASC, created_at ASC, uuid ASC
-                 LIMIT ?1",
+                 LIMIT ?",
             )
             .bind(fetch_limit)
             .fetch_all(self.pool)
@@ -608,7 +642,7 @@ impl<'a> ClientRepository<'a> {
     /// 客户端是否已禁用。
     pub async fn is_disabled(&self, uuid: &str) -> DbResult<bool> {
         let row: Option<(i64,)> =
-            sqlx::query_as("SELECT disabled FROM clients WHERE uuid = ?1 LIMIT 1")
+            sqlx::query_as("SELECT disabled FROM clients WHERE uuid = ? LIMIT 1")
                 .bind(uuid)
                 .fetch_optional(self.pool)
                 .await?;
@@ -619,7 +653,7 @@ impl<'a> ClientRepository<'a> {
     /// 更新最后活跃时间（RFC3339）。
     pub async fn touch_last_seen(&self, uuid: &str) -> DbResult<()> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query("UPDATE clients SET last_seen_at = ?1, updated_at = ?2 WHERE uuid = ?3")
+        sqlx::query("UPDATE clients SET last_seen_at = ?, updated_at = ? WHERE uuid = ?")
             .bind(now)
             .bind(Utc::now().to_rfc3339())
             .bind(uuid)
@@ -632,14 +666,12 @@ impl<'a> ClientRepository<'a> {
     /// 保存 Agent 上报的版本字符串。
     pub async fn set_agent_version(&self, uuid: &str, version: &str) -> DbResult<()> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE clients SET agent_version = ?1, updated_at = ?2 WHERE uuid = ?3",
-        )
-        .bind(version)
-        .bind(now)
-        .bind(uuid)
-        .execute(self.pool)
-        .await?;
+        sqlx::query("UPDATE clients SET agent_version = ?, updated_at = ? WHERE uuid = ?")
+            .bind(version)
+            .bind(now)
+            .bind(uuid)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 
@@ -658,18 +690,16 @@ impl<'a> ClientRepository<'a> {
         let version = agent_version.unwrap_or("").trim();
         let now = Utc::now().to_rfc3339();
         if version.is_empty() {
-            sqlx::query(
-                "UPDATE clients SET ipv4 = ?1, ipv6 = ?2, updated_at = ?3 WHERE uuid = ?4",
-            )
-            .bind(ipv4)
-            .bind(ipv6)
-            .bind(&now)
-            .bind(uuid)
-            .execute(self.pool)
-            .await?;
+            sqlx::query("UPDATE clients SET ipv4 = ?, ipv6 = ?, updated_at = ? WHERE uuid = ?")
+                .bind(ipv4)
+                .bind(ipv6)
+                .bind(&now)
+                .bind(uuid)
+                .execute(self.pool)
+                .await?;
         } else {
             sqlx::query(
-                "UPDATE clients SET ipv4 = ?1, ipv6 = ?2, agent_version = ?3, updated_at = ?4 WHERE uuid = ?5",
+                "UPDATE clients SET ipv4 = ?, ipv6 = ?, agent_version = ?, updated_at = ? WHERE uuid = ?",
             )
             .bind(ipv4)
             .bind(ipv6)
@@ -682,21 +712,15 @@ impl<'a> ClientRepository<'a> {
         Ok(())
     }
 
-    pub async fn update_basic_info(
-        &self,
-        uuid: &str,
-        basic: &serde_json::Value,
-    ) -> DbResult<()> {
+    pub async fn update_basic_info(&self, uuid: &str, basic: &serde_json::Value) -> DbResult<()> {
         let raw = serde_json::to_string(basic).map_err(|e| DbError::Message(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE clients SET basic_info_json = ?1, updated_at = ?2 WHERE uuid = ?3",
-        )
-        .bind(raw)
-        .bind(now)
-        .bind(uuid)
-        .execute(self.pool)
-        .await?;
+        sqlx::query("UPDATE clients SET basic_info_json = ?, updated_at = ? WHERE uuid = ?")
+            .bind(raw)
+            .bind(now)
+            .bind(uuid)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 
@@ -709,7 +733,7 @@ impl<'a> ClientRepository<'a> {
         os_label: Option<&str>,
     ) -> DbResult<()> {
         let row: Option<(String,)> =
-            sqlx::query_as("SELECT name FROM clients WHERE uuid = ?1 LIMIT 1")
+            sqlx::query_as("SELECT name FROM clients WHERE uuid = ? LIMIT 1")
                 .bind(uuid)
                 .fetch_optional(self.pool)
                 .await?;
@@ -733,7 +757,7 @@ impl<'a> ClientRepository<'a> {
             return Ok(());
         };
         let now = Utc::now().to_rfc3339();
-        sqlx::query("UPDATE clients SET name = ?1, updated_at = ?2 WHERE uuid = ?3")
+        sqlx::query("UPDATE clients SET name = ?, updated_at = ? WHERE uuid = ?")
             .bind(&new_name)
             .bind(now)
             .bind(uuid)
@@ -745,18 +769,17 @@ impl<'a> ClientRepository<'a> {
 
     /// Partial update for admin UI (name, billing, remarks).
     pub async fn patch_admin(&self, uuid: &str, patch: &AdminClientPatch) -> DbResult<bool> {
-        let exists: Option<(i64,)> =
-            sqlx::query_as("SELECT 1 FROM clients WHERE uuid = ?1 LIMIT 1")
-                .bind(uuid)
-                .fetch_optional(self.pool)
-                .await?;
+        let exists: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM clients WHERE uuid = ? LIMIT 1")
+            .bind(uuid)
+            .fetch_optional(self.pool)
+            .await?;
         if exists.is_none() {
             return Ok(false);
         }
         let now = Utc::now().to_rfc3339();
         if let Some(name) = &patch.name {
             let name = normalize_new_client_name(name, uuid);
-            sqlx::query("UPDATE clients SET name = ?1, updated_at = ?2 WHERE uuid = ?3")
+            sqlx::query("UPDATE clients SET name = ?, updated_at = ? WHERE uuid = ?")
                 .bind(name)
                 .bind(&now)
                 .bind(uuid)
@@ -764,7 +787,7 @@ impl<'a> ClientRepository<'a> {
                 .await?;
         }
         if let Some(group_name) = &patch.group_name {
-            sqlx::query("UPDATE clients SET group_name = ?1, updated_at = ?2 WHERE uuid = ?3")
+            sqlx::query("UPDATE clients SET group_name = ?, updated_at = ? WHERE uuid = ?")
                 .bind(group_name)
                 .bind(&now)
                 .bind(uuid)
@@ -772,7 +795,7 @@ impl<'a> ClientRepository<'a> {
                 .await?;
         }
         if let Some(private_remark) = &patch.private_remark {
-            sqlx::query("UPDATE clients SET private_remark = ?1, updated_at = ?2 WHERE uuid = ?3")
+            sqlx::query("UPDATE clients SET private_remark = ?, updated_at = ? WHERE uuid = ?")
                 .bind(private_remark)
                 .bind(&now)
                 .bind(uuid)
@@ -780,7 +803,7 @@ impl<'a> ClientRepository<'a> {
                 .await?;
         }
         if let Some(price) = patch.price {
-            sqlx::query("UPDATE clients SET price = ?1, updated_at = ?2 WHERE uuid = ?3")
+            sqlx::query("UPDATE clients SET price = ?, updated_at = ? WHERE uuid = ?")
                 .bind(price)
                 .bind(&now)
                 .bind(uuid)
@@ -788,7 +811,7 @@ impl<'a> ClientRepository<'a> {
                 .await?;
         }
         if let Some(billing_cycle) = patch.billing_cycle {
-            sqlx::query("UPDATE clients SET billing_cycle = ?1, updated_at = ?2 WHERE uuid = ?3")
+            sqlx::query("UPDATE clients SET billing_cycle = ?, updated_at = ? WHERE uuid = ?")
                 .bind(i64::from(billing_cycle))
                 .bind(&now)
                 .bind(uuid)
@@ -796,7 +819,7 @@ impl<'a> ClientRepository<'a> {
                 .await?;
         }
         if let Some(currency) = &patch.currency {
-            sqlx::query("UPDATE clients SET currency = ?1, updated_at = ?2 WHERE uuid = ?3")
+            sqlx::query("UPDATE clients SET currency = ?, updated_at = ? WHERE uuid = ?")
                 .bind(currency)
                 .bind(&now)
                 .bind(uuid)
@@ -812,7 +835,7 @@ impl<'a> ClientRepository<'a> {
                     Some(t.to_string())
                 }
             });
-            sqlx::query("UPDATE clients SET expired_at = ?1, updated_at = ?2 WHERE uuid = ?3")
+            sqlx::query("UPDATE clients SET expired_at = ?, updated_at = ? WHERE uuid = ?")
                 .bind(expired)
                 .bind(&now)
                 .bind(uuid)
@@ -820,7 +843,7 @@ impl<'a> ClientRepository<'a> {
                 .await?;
         }
         if let Some(auto_renewal) = patch.auto_renewal {
-            sqlx::query("UPDATE clients SET auto_renewal = ?1, updated_at = ?2 WHERE uuid = ?3")
+            sqlx::query("UPDATE clients SET auto_renewal = ?, updated_at = ? WHERE uuid = ?")
                 .bind(if auto_renewal { 1i64 } else { 0 })
                 .bind(&now)
                 .bind(uuid)
@@ -828,7 +851,7 @@ impl<'a> ClientRepository<'a> {
                 .await?;
         }
         if let Some(threshold) = patch.traffic_threshold {
-            sqlx::query("UPDATE clients SET traffic_threshold = ?1, updated_at = ?2 WHERE uuid = ?3")
+            sqlx::query("UPDATE clients SET traffic_threshold = ?, updated_at = ? WHERE uuid = ?")
                 .bind(threshold)
                 .bind(&now)
                 .bind(uuid)
@@ -836,7 +859,7 @@ impl<'a> ClientRepository<'a> {
                 .await?;
         }
         if let Some(mode) = &patch.traffic_stat_mode {
-            sqlx::query("UPDATE clients SET traffic_stat_mode = ?1, updated_at = ?2 WHERE uuid = ?3")
+            sqlx::query("UPDATE clients SET traffic_stat_mode = ?, updated_at = ? WHERE uuid = ?")
                 .bind(normalize_stat_mode(mode))
                 .bind(&now)
                 .bind(uuid)
@@ -844,7 +867,7 @@ impl<'a> ClientRepository<'a> {
                 .await?;
         }
         if let Some(mode) = &patch.traffic_reset_mode {
-            sqlx::query("UPDATE clients SET traffic_reset_mode = ?1, updated_at = ?2 WHERE uuid = ?3")
+            sqlx::query("UPDATE clients SET traffic_reset_mode = ?, updated_at = ? WHERE uuid = ?")
                 .bind(normalize_reset_mode(mode))
                 .bind(&now)
                 .bind(uuid)
@@ -852,7 +875,7 @@ impl<'a> ClientRepository<'a> {
                 .await?;
         }
         if let Some(bandwidth) = patch.bandwidth {
-            sqlx::query("UPDATE clients SET bandwidth = ?1, updated_at = ?2 WHERE uuid = ?3")
+            sqlx::query("UPDATE clients SET bandwidth = ?, updated_at = ? WHERE uuid = ?")
                 .bind(bandwidth)
                 .bind(&now)
                 .bind(uuid)
@@ -861,14 +884,34 @@ impl<'a> ClientRepository<'a> {
         }
         if let Some(unit) = &patch.bandwidth_unit {
             let unit = normalize_bandwidth_unit(unit);
-            sqlx::query("UPDATE clients SET bandwidth_unit = ?1, updated_at = ?2 WHERE uuid = ?3")
+            sqlx::query("UPDATE clients SET bandwidth_unit = ?, updated_at = ? WHERE uuid = ?")
                 .bind(unit)
                 .bind(&now)
                 .bind(uuid)
                 .execute(self.pool)
                 .await?;
         }
+        if let Some(interval) = patch.report_interval_ms {
+            let interval = interval.clamp(200, 3_600_000);
+            sqlx::query("UPDATE clients SET report_interval_ms = ?, updated_at = ? WHERE uuid = ?")
+                .bind(interval)
+                .bind(&now)
+                .bind(uuid)
+                .execute(self.pool)
+                .await?;
+        }
         Ok(true)
+    }
+
+    /// Returns the configured telemetry interval for one client (milliseconds).
+    /// 返回单个客户端配置的遥测间隔（毫秒）。
+    pub async fn report_interval_ms(&self, uuid: &str) -> DbResult<Option<i64>> {
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT report_interval_ms FROM clients WHERE uuid = ? LIMIT 1")
+                .bind(uuid)
+                .fetch_optional(self.pool)
+                .await?;
+        Ok(row.map(|(value,)| value))
     }
 
     /// Loads traffic ledger state for every client (billing watcher input).
@@ -945,9 +988,9 @@ impl<'a> ClientRepository<'a> {
         cycle_start: Option<&str>,
     ) -> DbResult<()> {
         sqlx::query(
-            "UPDATE clients SET traffic_used_up = ?1, traffic_used_down = ?2,
-                    traffic_last_json = ?3, traffic_cycle_start = ?4, updated_at = ?5
-             WHERE uuid = ?6",
+            "UPDATE clients SET traffic_used_up = ?, traffic_used_down = ?,
+                    traffic_last_json = ?, traffic_cycle_start = ?, updated_at = ?
+             WHERE uuid = ?",
         )
         .bind(used_up)
         .bind(used_down)
@@ -963,7 +1006,7 @@ impl<'a> ClientRepository<'a> {
     /// Pushes a new expiry timestamp (auto-renewal).
     /// 写入新的到期时间（自动续费）。
     pub async fn set_expired_at(&self, uuid: &str, expired_at: &str) -> DbResult<()> {
-        sqlx::query("UPDATE clients SET expired_at = ?1, updated_at = ?2 WHERE uuid = ?3")
+        sqlx::query("UPDATE clients SET expired_at = ?, updated_at = ? WHERE uuid = ?")
             .bind(expired_at)
             .bind(Utc::now().to_rfc3339())
             .bind(uuid)
@@ -978,8 +1021,8 @@ impl<'a> ClientRepository<'a> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "UPDATE clients SET traffic_used_up = 0, traffic_used_down = 0,
-                    traffic_last_json = NULL, traffic_cycle_start = ?1, updated_at = ?2
-             WHERE uuid = ?3",
+                    traffic_last_json = NULL, traffic_cycle_start = ?, updated_at = ?
+             WHERE uuid = ?",
         )
         .bind(&now)
         .bind(&now)
@@ -991,7 +1034,7 @@ impl<'a> ClientRepository<'a> {
 
     /// Removes a client row by uuid.
     pub async fn delete_by_uuid(&self, uuid: &str) -> DbResult<bool> {
-        let result = sqlx::query("DELETE FROM clients WHERE uuid = ?1")
+        let result = sqlx::query("DELETE FROM clients WHERE uuid = ?")
             .bind(uuid)
             .execute(self.pool)
             .await?;
@@ -1007,9 +1050,9 @@ impl<'a> ClientRepository<'a> {
         let mut tx = self.pool.begin().await?;
         let mut removed = 0u64;
         for uuid in uuids {
-            let result = sqlx::query("DELETE FROM clients WHERE uuid = ?1")
+            let result = sqlx::query("DELETE FROM clients WHERE uuid = ?")
                 .bind(uuid)
-                .execute(&mut *tx)
+                .execute(&mut tx)
                 .await?;
             removed += result.rows_affected();
         }
@@ -1027,14 +1070,13 @@ impl<'a> ClientRepository<'a> {
         let mut tx = self.pool.begin().await?;
         let mut updated = 0u64;
         for uuid in uuids {
-            let result = sqlx::query(
-                "UPDATE clients SET group_name = ?1, updated_at = ?2 WHERE uuid = ?3",
-            )
-            .bind(group_name)
-            .bind(&now)
-            .bind(uuid)
-            .execute(&mut *tx)
-            .await?;
+            let result =
+                sqlx::query("UPDATE clients SET group_name = ?, updated_at = ? WHERE uuid = ?")
+                    .bind(group_name)
+                    .bind(&now)
+                    .bind(uuid)
+                    .execute(&mut tx)
+                    .await?;
             updated += result.rows_affected();
         }
         tx.commit().await?;
@@ -1065,10 +1107,10 @@ impl<'a> ClientRepository<'a> {
 
         let mut tx = self.pool.begin().await?;
         for (idx, u) in ordered.iter().enumerate() {
-            sqlx::query("UPDATE clients SET sort_order = ?1 WHERE uuid = ?2")
+            sqlx::query("UPDATE clients SET sort_order = ? WHERE uuid = ?")
                 .bind((idx + 1) as f64)
                 .bind(u)
-                .execute(&mut *tx)
+                .execute(&mut tx)
                 .await?;
         }
         tx.commit().await?;
@@ -1077,14 +1119,27 @@ impl<'a> ClientRepository<'a> {
 
     /// Updates the cached online flag on disconnect / connect.
     /// 在连接/断开时更新缓存的 online flag。
+    /// Best-effort node address for audit records (IPv4 preferred).
+    /// 审计记录用的节点地址（优先 IPv4）。
+    pub async fn address_by_uuid(&self, uuid: &str) -> DbResult<Option<String>> {
+        let row: Option<(String, String)> =
+            sqlx::query_as("SELECT ipv4, ipv6 FROM clients WHERE uuid = ? LIMIT 1")
+                .bind(uuid)
+                .fetch_optional(self.pool)
+                .await?;
+        Ok(row
+            .map(|(ipv4, ipv6)| if !ipv4.trim().is_empty() { ipv4 } else { ipv6 })
+            .filter(|address| !address.trim().is_empty()))
+    }
+
     pub async fn set_online(&self, uuid: &str, online: bool) -> DbResult<()> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query("UPDATE clients SET online = ?1, updated_at = ?2 WHERE uuid = ?3")
+        sqlx::query("UPDATE clients SET online = ?, updated_at = ? WHERE uuid = ?")
             .bind(if online { 1i64 } else { 0 })
             .bind(now)
-        .bind(uuid)
-        .execute(self.pool)
-        .await?;
+            .bind(uuid)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 
@@ -1099,8 +1154,8 @@ impl<'a> ClientRepository<'a> {
         uptime_secs: u64,
     ) -> DbResult<()> {
         sqlx::query(
-            "UPDATE clients SET last_net_total_up = ?1, last_net_total_down = ?2, \
-             last_uptime_secs = ?3 WHERE uuid = ?4",
+            "UPDATE clients SET last_net_total_up = ?, last_net_total_down = ?, \
+             last_uptime_secs = ? WHERE uuid = ?",
         )
         .bind(net_total_up as i64)
         .bind(net_total_down as i64)
@@ -1124,7 +1179,7 @@ impl<'a> ClientRepository<'a> {
     ) -> DbResult<()> {
         match (region, region6) {
             (Some(v4), Some(v6)) => {
-                sqlx::query("UPDATE clients SET region = ?1, region6 = ?2 WHERE uuid = ?3")
+                sqlx::query("UPDATE clients SET region = ?, region6 = ? WHERE uuid = ?")
                     .bind(v4)
                     .bind(v6)
                     .bind(uuid)
@@ -1132,14 +1187,14 @@ impl<'a> ClientRepository<'a> {
                     .await?;
             }
             (Some(v4), None) => {
-                sqlx::query("UPDATE clients SET region = ?1 WHERE uuid = ?2")
+                sqlx::query("UPDATE clients SET region = ? WHERE uuid = ?")
                     .bind(v4)
                     .bind(uuid)
                     .execute(self.pool)
                     .await?;
             }
             (None, Some(v6)) => {
-                sqlx::query("UPDATE clients SET region6 = ?1 WHERE uuid = ?2")
+                sqlx::query("UPDATE clients SET region6 = ? WHERE uuid = ?")
                     .bind(v6)
                     .bind(uuid)
                     .execute(self.pool)
@@ -1155,8 +1210,20 @@ impl<'a> ClientRepository<'a> {
     /// 在面板启动时清除所有在线标记（进程启动前不可能存在任何活跃会话）。
     pub async fn set_all_offline(&self) -> DbResult<Vec<String>> {
         let now = Utc::now().to_rfc3339();
+        // MySQL has no UPDATE ... RETURNING: select first, then update.
+        // MySQL 不支持 UPDATE ... RETURNING：先查询，再更新。
+        if self.pool.kind() == DbKind::MySql {
+            let rows: Vec<(String,)> = sqlx::query_as("SELECT uuid FROM clients WHERE online = 1")
+                .fetch_all(self.pool)
+                .await?;
+            sqlx::query("UPDATE clients SET online = 0, updated_at = ? WHERE online = 1")
+                .bind(now)
+                .execute(self.pool)
+                .await?;
+            return Ok(rows.into_iter().map(|(uuid,)| uuid).collect());
+        }
         let rows = sqlx::query_scalar::<_, String>(
-            "UPDATE clients SET online = 0, updated_at = ?1 \
+            "UPDATE clients SET online = 0, updated_at = ? \
              WHERE online = 1 RETURNING uuid",
         )
         .bind(now)
@@ -1173,9 +1240,29 @@ impl<'a> ClientRepository<'a> {
     pub async fn mark_stale_offline(&self, stale_secs: i64) -> DbResult<Vec<String>> {
         let now = Utc::now().to_rfc3339();
         let cutoff = (Utc::now() - chrono::Duration::seconds(stale_secs)).to_rfc3339();
+        // MySQL has no UPDATE ... RETURNING: select first, then update.
+        // MySQL 不支持 UPDATE ... RETURNING：先查询，再更新。
+        if self.pool.kind() == DbKind::MySql {
+            let rows: Vec<(String,)> = sqlx::query_as(
+                "SELECT uuid FROM clients WHERE online = 1 \
+                 AND last_seen_at IS NOT NULL AND last_seen_at < ?",
+            )
+            .bind(&cutoff)
+            .fetch_all(self.pool)
+            .await?;
+            sqlx::query(
+                "UPDATE clients SET online = 0, updated_at = ? \
+                 WHERE online = 1 AND last_seen_at IS NOT NULL AND last_seen_at < ?",
+            )
+            .bind(now)
+            .bind(&cutoff)
+            .execute(self.pool)
+            .await?;
+            return Ok(rows.into_iter().map(|(uuid,)| uuid).collect());
+        }
         let rows = sqlx::query_scalar::<_, String>(
-            "UPDATE clients SET online = 0, updated_at = ?1 \
-             WHERE online = 1 AND last_seen_at IS NOT NULL AND last_seen_at < ?2 \
+            "UPDATE clients SET online = 0, updated_at = ? \
+             WHERE online = 1 AND last_seen_at IS NOT NULL AND last_seen_at < ? \
              RETURNING uuid",
         )
         .bind(now)

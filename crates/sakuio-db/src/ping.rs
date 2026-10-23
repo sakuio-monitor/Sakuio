@@ -1,7 +1,7 @@
+use crate::{DbKind, DbPool};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::SqlitePool;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -36,11 +36,11 @@ pub struct PingRecordRow {
 }
 
 pub struct PingRepository<'a> {
-    pool: &'a SqlitePool,
+    pool: &'a DbPool,
 }
 
 impl<'a> PingRepository<'a> {
-    pub fn new(pool: &'a SqlitePool) -> Self {
+    pub fn new(pool: &'a DbPool) -> Self {
         Self { pool }
     }
 
@@ -64,22 +64,47 @@ impl<'a> PingRepository<'a> {
         interval: i32,
     ) -> PingDbResult<i64> {
         let now = Utc::now().to_rfc3339();
-        let clients_json = serde_json::to_string(clients).map_err(|e| PingDbError::Message(e.to_string()))?;
-        let result = sqlx::query(
+        let clients_json =
+            serde_json::to_string(clients).map_err(|e| PingDbError::Message(e.to_string()))?;
+        let sql = if self.pool.kind() == DbKind::Postgres {
+            // PostgreSQL has no last_insert_id: RETURNING is the portable path.
+            // PostgreSQL 没有 last_insert_id：使用 RETURNING。
             "INSERT INTO ping_tasks (weight, name, clients_json, default_on, type, target, interval_secs, created_at, updated_at)
-             VALUES (0, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-        )
-        .bind(name)
-        .bind(clients_json)
-        .bind(default_on as i32)
-        .bind(task_type)
-        .bind(target)
-        .bind(interval)
-        .bind(&now)
-        .execute(self.pool)
-        .await?;
-        let id = result.last_insert_rowid();
-        sqlx::query("UPDATE ping_tasks SET weight = ?1 WHERE id = ?1")
+             VALUES (0, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"
+        } else {
+            "INSERT INTO ping_tasks (weight, name, clients_json, default_on, type, target, interval_secs, created_at, updated_at)
+             VALUES (0, ?, ?, ?, ?, ?, ?, ?, ?)"
+        };
+        let query = sqlx::query(sql)
+            .bind(name)
+            .bind(clients_json)
+            .bind(default_on as i32)
+            .bind(task_type)
+            .bind(target)
+            .bind(interval)
+            .bind(&now)
+            .bind(&now);
+        let id = if self.pool.kind() == DbKind::Postgres {
+            let row = query.fetch_one(self.pool).await?;
+            use sqlx::Row;
+            row.try_get::<i64, _>(0)
+                .map_err(|e| PingDbError::Message(e.to_string()))?
+        } else {
+            let result = query.execute(self.pool).await?;
+            match result.last_insert_id() {
+                Some(id) => id,
+                None => {
+                    sqlx::query_scalar::<_, i64>("SELECT MAX(id) FROM ping_tasks")
+                        .fetch_one(self.pool)
+                        .await?
+                }
+            }
+        };
+        // New tasks go to the end of the order; weight starts at their id.
+        // 新任务排在末尾，初始权重取自身 id。
+        let weight = id as i32;
+        sqlx::query("UPDATE ping_tasks SET weight = ? WHERE id = ?")
+            .bind(weight)
             .bind(id)
             .execute(self.pool)
             .await?;
@@ -120,11 +145,11 @@ impl<'a> PingRepository<'a> {
 
     pub async fn update_task(&self, task: &PingTaskRow) -> PingDbResult<()> {
         let now = Utc::now().to_rfc3339();
-        let clients_json =
-            serde_json::to_string(&task.clients).map_err(|e| PingDbError::Message(e.to_string()))?;
+        let clients_json = serde_json::to_string(&task.clients)
+            .map_err(|e| PingDbError::Message(e.to_string()))?;
         let n = sqlx::query(
-            "UPDATE ping_tasks SET name = ?1, clients_json = ?2, default_on = ?3, type = ?4, target = ?5,
-             interval_secs = ?6, updated_at = ?7 WHERE id = ?8",
+            "UPDATE ping_tasks SET name = ?, clients_json = ?, default_on = ?, type = ?, target = ?,
+             interval_secs = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&task.name)
         .bind(clients_json)
@@ -145,7 +170,7 @@ impl<'a> PingRepository<'a> {
 
     pub async fn update_order(&self, order: &[(i64, i32)]) -> PingDbResult<()> {
         for (id, weight) in order {
-            sqlx::query("UPDATE ping_tasks SET weight = ?1 WHERE id = ?2")
+            sqlx::query("UPDATE ping_tasks SET weight = ? WHERE id = ?")
                 .bind(weight)
                 .bind(id)
                 .execute(self.pool)
@@ -199,8 +224,11 @@ impl<'a> PingRepository<'a> {
         value_ms: i32,
         observed_at_ms: i64,
     ) -> PingDbResult<()> {
+        if crate::maintenance_active() {
+            return Ok(());
+        }
         sqlx::query(
-            "INSERT INTO ping_records (client_uuid, task_id, observed_at_ms, value_ms) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO ping_records (client_uuid, task_id, observed_at_ms, value_ms) VALUES (?, ?, ?, ?)",
         )
         .bind(client_uuid)
         .bind(task_id)
@@ -208,6 +236,39 @@ impl<'a> PingRepository<'a> {
         .bind(value_ms)
         .execute(self.pool)
         .await?;
+        self.rollup_ping(client_uuid, task_id, observed_at_ms, value_ms)
+            .await?;
+        Ok(())
+    }
+
+    async fn rollup_ping(
+        &self,
+        client_uuid: &str,
+        task_id: i64,
+        observed_at_ms: i64,
+        value_ms: i32,
+    ) -> PingDbResult<()> {
+        let hour = observed_at_ms - observed_at_ms.rem_euclid(3_600_000);
+        let valid = if value_ms >= 0 { 1 } else { 0 };
+        let loss = 1 - valid;
+        let value = value_ms.max(0) as f64;
+        let sql = match self.pool.kind() {
+            DbKind::MySql => "INSERT INTO ping_rollup_hourly (task_id, client_uuid, hour_start_ms, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE samples = samples + 1, valid = valid + VALUES(valid), loss_count = loss_count + VALUES(loss_count), sum_ms = sum_ms + VALUES(sum_ms), sum_sq_ms = sum_sq_ms + VALUES(sum_sq_ms), min_ms = LEAST(min_ms, VALUES(min_ms)), max_ms = GREATEST(max_ms, VALUES(max_ms))",
+            DbKind::Postgres => "INSERT INTO ping_rollup_hourly (task_id, client_uuid, hour_start_ms, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) ON CONFLICT (task_id, client_uuid, hour_start_ms) DO UPDATE SET samples = ping_rollup_hourly.samples + 1, valid = ping_rollup_hourly.valid + excluded.valid, loss_count = ping_rollup_hourly.loss_count + excluded.loss_count, sum_ms = ping_rollup_hourly.sum_ms + excluded.sum_ms, sum_sq_ms = ping_rollup_hourly.sum_sq_ms + excluded.sum_sq_ms, min_ms = LEAST(ping_rollup_hourly.min_ms, excluded.min_ms), max_ms = GREATEST(ping_rollup_hourly.max_ms, excluded.max_ms)",
+            DbKind::Sqlite => "INSERT INTO ping_rollup_hourly (task_id, client_uuid, hour_start_ms, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) ON CONFLICT (task_id, client_uuid, hour_start_ms) DO UPDATE SET samples = ping_rollup_hourly.samples + 1, valid = ping_rollup_hourly.valid + excluded.valid, loss_count = ping_rollup_hourly.loss_count + excluded.loss_count, sum_ms = ping_rollup_hourly.sum_ms + excluded.sum_ms, sum_sq_ms = ping_rollup_hourly.sum_sq_ms + excluded.sum_sq_ms, min_ms = MIN(ping_rollup_hourly.min_ms, excluded.min_ms), max_ms = MAX(ping_rollup_hourly.max_ms, excluded.max_ms)",
+        };
+        sqlx::query(sql)
+            .bind(task_id)
+            .bind(client_uuid)
+            .bind(hour)
+            .bind(valid)
+            .bind(loss)
+            .bind(value)
+            .bind(value * value)
+            .bind(value)
+            .bind(value)
+            .execute(self.pool)
+            .await?;
         Ok(())
     }
 
@@ -224,8 +285,8 @@ impl<'a> PingRepository<'a> {
             (Some(uuid), Some(tid)) => {
                 sqlx::query_as(
                     "SELECT client_uuid, task_id, observed_at_ms, value_ms FROM ping_records
-                     WHERE client_uuid = ?1 AND task_id = ?2 AND observed_at_ms >= ?3 AND observed_at_ms <= ?4
-                     ORDER BY observed_at_ms ASC LIMIT ?5",
+                     WHERE client_uuid = ? AND task_id = ? AND observed_at_ms >= ? AND observed_at_ms <= ?
+                     ORDER BY observed_at_ms ASC LIMIT ?",
                 )
                 .bind(uuid)
                 .bind(tid)
@@ -238,8 +299,8 @@ impl<'a> PingRepository<'a> {
             (Some(uuid), None) => {
                 sqlx::query_as(
                     "SELECT client_uuid, task_id, observed_at_ms, value_ms FROM ping_records
-                     WHERE client_uuid = ?1 AND observed_at_ms >= ?2 AND observed_at_ms <= ?3
-                     ORDER BY observed_at_ms ASC LIMIT ?4",
+                     WHERE client_uuid = ? AND observed_at_ms >= ? AND observed_at_ms <= ?
+                     ORDER BY observed_at_ms ASC LIMIT ?",
                 )
                 .bind(uuid)
                 .bind(since_ms)
@@ -251,8 +312,8 @@ impl<'a> PingRepository<'a> {
             (None, Some(tid)) => {
                 sqlx::query_as(
                     "SELECT client_uuid, task_id, observed_at_ms, value_ms FROM ping_records
-                     WHERE task_id = ?1 AND observed_at_ms >= ?2 AND observed_at_ms <= ?3
-                     ORDER BY observed_at_ms ASC LIMIT ?4",
+                     WHERE task_id = ? AND observed_at_ms >= ? AND observed_at_ms <= ?
+                     ORDER BY observed_at_ms ASC LIMIT ?",
                 )
                 .bind(tid)
                 .bind(since_ms)
@@ -264,8 +325,8 @@ impl<'a> PingRepository<'a> {
             (None, None) => {
                 sqlx::query_as(
                     "SELECT client_uuid, task_id, observed_at_ms, value_ms FROM ping_records
-                     WHERE observed_at_ms >= ?1 AND observed_at_ms <= ?2
-                     ORDER BY observed_at_ms ASC LIMIT ?3",
+                     WHERE observed_at_ms >= ? AND observed_at_ms <= ?
+                     ORDER BY observed_at_ms ASC LIMIT ?",
                 )
                 .bind(since_ms)
                 .bind(until_ms)

@@ -1,15 +1,15 @@
+use crate::DbPool;
 use chrono::Utc;
 use serde_json::Value;
-use sqlx::SqlitePool;
 
 use crate::DbResult;
 
 pub struct ExecRepository<'a> {
-    pool: &'a SqlitePool,
+    pool: &'a DbPool,
 }
 
 impl<'a> ExecRepository<'a> {
-    pub fn new(pool: &'a SqlitePool) -> Self {
+    pub fn new(pool: &'a DbPool) -> Self {
         Self { pool }
     }
 
@@ -19,6 +19,9 @@ impl<'a> ExecRepository<'a> {
         command: &str,
         clients: &[String],
     ) -> DbResult<()> {
+        if crate::maintenance_active() {
+            return Ok(());
+        }
         let clients_json = serde_json::to_string(clients).unwrap_or_else(|_| "[]".into());
         let created_at = Utc::now().to_rfc3339();
         sqlx::query(
@@ -34,6 +37,9 @@ impl<'a> ExecRepository<'a> {
     }
 
     pub async fn insert_pending_result(&self, task_id: &str, client_uuid: &str) -> DbResult<()> {
+        if crate::maintenance_active() {
+            return Ok(());
+        }
         let created_at = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO exec_task_results (task_id, client_uuid, result, exit_code, finished_at, created_at)
@@ -54,6 +60,9 @@ impl<'a> ExecRepository<'a> {
         result: &str,
         exit_code: i32,
     ) -> DbResult<()> {
+        if crate::maintenance_active() {
+            return Ok(());
+        }
         let finished_at = Utc::now().to_rfc3339();
         sqlx::query(
             "UPDATE exec_task_results

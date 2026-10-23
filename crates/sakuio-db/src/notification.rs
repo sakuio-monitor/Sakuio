@@ -1,6 +1,6 @@
+use crate::DbPool;
 use chrono::Utc;
 use serde_json::Value;
-use sqlx::SqlitePool;
 
 use crate::DbResult;
 
@@ -11,21 +11,22 @@ pub struct NotificationInstanceRow {
     pub name: String,
     pub enabled: bool,
     pub config: Value,
+    pub last_used_at: String,
     pub updated_at: String,
 }
 
 pub struct NotificationRepository<'a> {
-    pool: &'a SqlitePool,
+    pool: &'a DbPool,
 }
 
 impl<'a> NotificationRepository<'a> {
-    pub fn new(pool: &'a SqlitePool) -> Self {
+    pub fn new(pool: &'a DbPool) -> Self {
         Self { pool }
     }
 
     pub async fn list_all(&self) -> DbResult<Vec<NotificationInstanceRow>> {
-        let rows: Vec<(String, String, String, i64, String, String)> = sqlx::query_as(
-            "SELECT id, channel_type, name, enabled, config_json, updated_at
+        let rows: Vec<(String, String, String, i64, String, String, String)> = sqlx::query_as(
+            "SELECT id, channel_type, name, enabled, config_json, last_used_at, updated_at
              FROM notification_channel_instances
              ORDER BY updated_at DESC",
         )
@@ -33,22 +34,25 @@ impl<'a> NotificationRepository<'a> {
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(id, channel_type, name, enabled, config_json, updated_at)| {
-                NotificationInstanceRow {
-                    id,
-                    channel_type,
-                    name,
-                    enabled: enabled != 0,
-                    config: parse_config(&config_json),
-                    updated_at,
-                }
-            })
+            .map(
+                |(id, channel_type, name, enabled, config_json, last_used_at, updated_at)| {
+                    NotificationInstanceRow {
+                        id,
+                        channel_type,
+                        name,
+                        enabled: enabled != 0,
+                        config: parse_config(&config_json),
+                        last_used_at,
+                        updated_at,
+                    }
+                },
+            )
             .collect())
     }
 
     pub async fn get_by_id(&self, id: &str) -> DbResult<Option<NotificationInstanceRow>> {
-        let row: Option<(String, String, String, i64, String, String)> = sqlx::query_as(
-            "SELECT id, channel_type, name, enabled, config_json, updated_at
+        let row: Option<(String, String, String, i64, String, String, String)> = sqlx::query_as(
+            "SELECT id, channel_type, name, enabled, config_json, last_used_at, updated_at
              FROM notification_channel_instances
              WHERE id = ?
              LIMIT 1",
@@ -57,12 +61,13 @@ impl<'a> NotificationRepository<'a> {
         .fetch_optional(self.pool)
         .await?;
         Ok(row.map(
-            |(id, channel_type, name, enabled, config_json, updated_at)| NotificationInstanceRow {
+            |(id, channel_type, name, enabled, config_json, last_used_at, updated_at)| NotificationInstanceRow {
                 id,
                 channel_type,
                 name,
                 enabled: enabled != 0,
                 config: parse_config(&config_json),
+                last_used_at,
                 updated_at,
             },
         ))
@@ -80,8 +85,8 @@ impl<'a> NotificationRepository<'a> {
         let updated_at = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO notification_channel_instances
-             (id, channel_type, name, enabled, config_json, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+             (id, channel_type, name, enabled, config_json, last_used_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, '', ?)",
         )
         .bind(id)
         .bind(channel_type)
@@ -127,24 +132,50 @@ impl<'a> NotificationRepository<'a> {
     }
 
     pub async fn list_rules(&self) -> DbResult<Vec<NotificationRuleRow>> {
-        let rows: Vec<(String, String, String, i64, String, String, String, String, String)> =
-            sqlx::query_as(
-                "SELECT id, name, event_type, threshold, channels_json, clients_json,
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+        )> = sqlx::query_as(
+            "SELECT id, name, event_type, threshold, duration_secs, enabled,
+                        channels_json, clients_json,
                         template_title, template_body, updated_at
                  FROM notification_rules
                  ORDER BY updated_at DESC",
-            )
-            .fetch_all(self.pool)
-            .await?;
+        )
+        .fetch_all(self.pool)
+        .await?;
         Ok(rows
             .into_iter()
             .map(
-                |(id, name, event_type, threshold, channels_json, clients_json, template_title, template_body, updated_at)| {
+                |(
+                    id,
+                    name,
+                    event_type,
+                    threshold,
+                    duration_secs,
+                    enabled,
+                    channels_json,
+                    clients_json,
+                    template_title,
+                    template_body,
+                    updated_at,
+                )| {
                     NotificationRuleRow {
                         id,
                         name,
                         event_type,
                         threshold,
+                        duration_secs,
+                        enabled: enabled != 0,
                         channels: parse_string_list(&channels_json),
                         clients: parse_string_list(&clients_json),
                         template_title,
@@ -157,26 +188,52 @@ impl<'a> NotificationRepository<'a> {
     }
 
     pub async fn get_rule(&self, id: &str) -> DbResult<Option<NotificationRuleRow>> {
-        let rows: Vec<(String, String, String, i64, String, String, String, String, String)> =
-            sqlx::query_as(
-                "SELECT id, name, event_type, threshold, channels_json, clients_json,
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+        )> = sqlx::query_as(
+            "SELECT id, name, event_type, threshold, duration_secs, enabled,
+                        channels_json, clients_json,
                         template_title, template_body, updated_at
                  FROM notification_rules
                  WHERE id = ?
                  LIMIT 1",
-            )
-            .bind(id)
-            .fetch_all(self.pool)
-            .await?;
+        )
+        .bind(id)
+        .fetch_all(self.pool)
+        .await?;
         Ok(rows
             .into_iter()
             .map(
-                |(id, name, event_type, threshold, channels_json, clients_json, template_title, template_body, updated_at)| {
+                |(
+                    id,
+                    name,
+                    event_type,
+                    threshold,
+                    duration_secs,
+                    enabled,
+                    channels_json,
+                    clients_json,
+                    template_title,
+                    template_body,
+                    updated_at,
+                )| {
                     NotificationRuleRow {
                         id,
                         name,
                         event_type,
                         threshold,
+                        duration_secs,
+                        enabled: enabled != 0,
                         channels: parse_string_list(&channels_json),
                         clients: parse_string_list(&clients_json),
                         template_title,
@@ -194,6 +251,8 @@ impl<'a> NotificationRepository<'a> {
         name: &str,
         event_type: &str,
         threshold: i64,
+        duration_secs: i64,
+        enabled: bool,
         channels: &[String],
         clients: &[String],
         template_title: &str,
@@ -202,14 +261,16 @@ impl<'a> NotificationRepository<'a> {
         let updated_at = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO notification_rules
-             (id, name, event_type, threshold, channels_json, clients_json,
-              template_title, template_body, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, name, event_type, threshold, duration_secs, enabled,
+              channels_json, clients_json, template_title, template_body, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id)
         .bind(name)
         .bind(event_type)
         .bind(threshold)
+        .bind(duration_secs)
+        .bind(if enabled { 1i64 } else { 0 })
         .bind(serde_json::to_string(channels).unwrap_or_else(|_| "[]".into()))
         .bind(serde_json::to_string(clients).unwrap_or_else(|_| "[]".into()))
         .bind(template_title)
@@ -226,6 +287,8 @@ impl<'a> NotificationRepository<'a> {
         name: &str,
         event_type: &str,
         threshold: i64,
+        duration_secs: i64,
+        enabled: bool,
         channels: &[String],
         clients: &[String],
         template_title: &str,
@@ -234,13 +297,16 @@ impl<'a> NotificationRepository<'a> {
         let updated_at = Utc::now().to_rfc3339();
         let result = sqlx::query(
             "UPDATE notification_rules
-             SET name = ?, event_type = ?, threshold = ?, channels_json = ?, clients_json = ?,
+             SET name = ?, event_type = ?, threshold = ?, duration_secs = ?, enabled = ?,
+                 channels_json = ?, clients_json = ?,
                  template_title = ?, template_body = ?, updated_at = ?
              WHERE id = ?",
         )
         .bind(name)
         .bind(event_type)
         .bind(threshold)
+        .bind(duration_secs)
+        .bind(if enabled { 1i64 } else { 0 })
         .bind(serde_json::to_string(channels).unwrap_or_else(|_| "[]".into()))
         .bind(serde_json::to_string(clients).unwrap_or_else(|_| "[]".into()))
         .bind(template_title)
@@ -249,6 +315,35 @@ impl<'a> NotificationRepository<'a> {
         .bind(id)
         .execute(self.pool)
         .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn set_instance_enabled(&self, id: &str, enabled: bool) -> DbResult<bool> {
+        let result = sqlx::query("UPDATE notification_channel_instances SET enabled = ?, updated_at = ? WHERE id = ?")
+            .bind(if enabled { 1i64 } else { 0 })
+            .bind(Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn touch_instance(&self, id: &str) -> DbResult<()> {
+        sqlx::query("UPDATE notification_channel_instances SET last_used_at = ? WHERE id = ?")
+            .bind(Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_rule_enabled(&self, id: &str, enabled: bool) -> DbResult<bool> {
+        let result = sqlx::query("UPDATE notification_rules SET enabled = ?, updated_at = ? WHERE id = ?")
+            .bind(if enabled { 1i64 } else { 0 })
+            .bind(Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -267,6 +362,8 @@ pub struct NotificationRuleRow {
     pub name: String,
     pub event_type: String,
     pub threshold: i64,
+    pub duration_secs: i64,
+    pub enabled: bool,
     pub channels: Vec<String>,
     pub clients: Vec<String>,
     pub template_title: String,
