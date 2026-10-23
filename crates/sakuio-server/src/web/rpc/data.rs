@@ -149,7 +149,7 @@ pub fn client_record(row: &PublicClientRow, guest_view: bool, show_partial_ip: b
         "swap_total": basic.swap_total.unwrap_or(0),
         "disk_total": basic.disk_total.unwrap_or(0),
         "version": version,
-        "weight": 0,
+        "weight": row.sort_order,
         "price": row.price,
         "billing_cycle": row.billing_cycle,
         "auto_renewal": row.auto_renewal,

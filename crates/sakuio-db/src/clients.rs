@@ -210,6 +210,7 @@ pub fn traffic_used_by_mode(used_up: i64, used_down: i64, mode: &str) -> i64 {
 pub struct PublicClientRow {
     pub uuid: String,
     pub name: String,
+    pub sort_order: f64,
     pub online: bool,
     pub disabled: bool,
     pub ipv4: String,
@@ -273,6 +274,7 @@ fn decode_admin_list_cursor(raw: &str) -> Option<(Option<f64>, String, String)> 
 struct PublicClientRowRaw {
     uuid: String,
     name: String,
+    sort_order: f64,
     online: i64,
     disabled: i64,
     ipv4: String,
@@ -487,7 +489,7 @@ impl<'a> ClientRepository<'a> {
     /// All clients with fields needed for public theme RPC.
     pub async fn list_for_public_api(&self) -> DbResult<Vec<PublicClientRow>> {
         let rows: Vec<PublicClientRowRaw> = sqlx::query_as(
-            "SELECT uuid, name, online, disabled, ipv4, ipv6, region, region6,
+            "SELECT uuid, name, sort_order, online, disabled, ipv4, ipv6, region, region6,
                     agent_version,
                     group_name, private_remark, price, billing_cycle, currency,
                     expired_at, created_at, updated_at, basic_info_json,
@@ -505,6 +507,7 @@ impl<'a> ClientRepository<'a> {
             .map(|row| PublicClientRow {
                 uuid: row.uuid,
                 name: row.name,
+                sort_order: row.sort_order,
                 online: row.online != 0,
                 disabled: row.disabled != 0,
                 ipv4: row.ipv4,
