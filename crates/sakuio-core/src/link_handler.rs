@@ -300,18 +300,18 @@ impl BoardSessionHandler for LinkSessionHandler {
             .await
             .map_err(state_err)?;
         let clients = ClientRepository::new(&self.db);
-        let _ = clients.touch_last_seen(node_uuid).await;
-        // Persist cumulative counters so totals survive board restarts.
-        // 持久化累计值，保证面板重启后总流量 / 运行时长不清零。
+        // One UPDATE per batch covers last_seen and the cumulative snapshot.
         if let Some(sample) = batch.samples.last() {
             let _ = clients
-                .update_last_runtime(
+                .touch_last_seen_with_runtime(
                     node_uuid,
                     sample.network.total_up,
                     sample.network.total_down,
                     sample.uptime,
                 )
                 .await;
+        } else {
+            let _ = clients.touch_last_seen(node_uuid).await;
         }
         tracing::debug!(
             node_uuid = %node_uuid,
