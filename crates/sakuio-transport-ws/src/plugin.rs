@@ -9,13 +9,13 @@ use axum::{
 };
 use sakuio_board::{
     BoardFrame, BoardSession, BoardSessionHandler, BoardStateStore, BoardTransportRegistry,
-    TransportPlugin, TransportError,
+    TransportError, TransportPlugin,
 };
-use sakuio_core::{flush_pending_ping_commands, AgentCommandBus, new_session_id};
+use sakuio_core::{flush_pending_ping_commands, new_session_id, AgentCommandBus};
 use sakuio_db::ClientRepository;
+use sakuio_db::DbPool;
 use sakuio_protocol::{ControlMessage, TelemetryBatch};
 use serde::Deserialize;
-use sqlx::SqlitePool;
 use std::sync::Arc;
 
 /// Default HTTP path for the agent WebSocket link.
@@ -26,7 +26,7 @@ pub const WS_LINK_PATH: &str = "/api/agent/link";
 /// WebSocket 升级处理器共享状态。
 #[derive(Clone)]
 pub struct WsLinkState {
-    pub db: SqlitePool,
+    pub db: DbPool,
     pub handler: Arc<dyn BoardSessionHandler>,
     pub command_bus: AgentCommandBus,
     pub board: Arc<dyn BoardStateStore>,
@@ -50,7 +50,10 @@ impl TransportPlugin for WsBoardTransportPlugin {
     }
 
     fn register(&self, _registry: &mut BoardTransportRegistry) -> Result<(), TransportError> {
-        tracing::debug!(transport = "websocket", "transport plugin registered (server mounts via router)");
+        tracing::debug!(
+            transport = "websocket",
+            "transport plugin registered (server mounts via router)"
+        );
         Ok(())
     }
 }
@@ -92,7 +95,7 @@ fn friendly_link_error(raw: &str) -> String {
 }
 
 async fn run_link_session(
-    db: SqlitePool,
+    db: DbPool,
     handler: Arc<dyn BoardSessionHandler>,
     command_bus: AgentCommandBus,
     board: Arc<dyn BoardStateStore>,
@@ -134,14 +137,8 @@ async fn run_link_session(
     // connection reset without a closing handshake).
     // 先跑事件循环，随后无论正常结束还是报错都注销并触发 on_disconnect，
     // 保证节点一定被标记离线（如未握手直接断开的连接重置）。
-    let outcome = link_event_loop(
-        &handler,
-        &mut session,
-        &mut cmd_rx,
-        &node_uuid,
-        &session_id,
-    )
-    .await;
+    let outcome =
+        link_event_loop(&handler, &mut session, &mut cmd_rx, &node_uuid, &session_id).await;
 
     command_bus.unregister(&node_uuid).await;
     handler.on_disconnect(node_uuid.clone(), session_id).await;

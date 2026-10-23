@@ -1,19 +1,20 @@
-//! 统一 GeoIP 缓存解析器（内存版）。
-//! - 按 **IP** 维护国家代码缓存：每个 IP 首次出现解析一次，后续全部走缓存
-//! - TTL 7 天 ± 48h 随机抖动（每条目独立），避免大量节点同时到期把上游 API 打爆
-//! - 上游查询全局限速 ~15 req/s（排队节流），无论节点数量多少
-//! - 切换 GeoIP 提供商（常规设置）时全部缓存标记失效，按新提供商重新解析
-//! - 前后端旗帜渲染统一从这里取数，前端不再直连第三方 geo API
+//! Global persistent IP geolocation engine shared by node flags, audit logs
+//! and IP detail views. The hot path uses an in-memory map; the durable cache
+//! lives in `ip_geo_cache` so restarts do not re-query upstream providers.
+//! 全局 IP 归属地引擎：内存热缓存 + 数据库持久缓存，节点/日志/详情共用。
 
 use crate::AppState;
-use sakuio_db::{ClientRepository, PublicClientRow};
+use chrono::{SecondsFormat, Utc};
+use sakuio_db::{ClientRepository, DbPool, GeoCacheRepository, PublicClientRow};
+use sakuio_notify::ipgeo::GeoInfo;
 use std::collections::{HashMap, HashSet};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Mutex as AsyncMutex};
 
 struct CacheEntry {
     code: String,
+    location: String,
     expires_at: Instant,
 }
 
@@ -24,16 +25,15 @@ fn mem() -> &'static RwLock<HashMap<String, CacheEntry>> {
 
 /// 基础 TTL：7 天。
 const BASE_TTL_SECS: u64 = 7 * 86400;
-/// 抖动幅度：±48 小时（实际 TTL ∈ [5d, 9d]）。
+/// 抖动幅度：±48 小时。
 const JITTER_SECS: u64 = 2 * 86400;
-/// 空 / 失败结果的负缓存时长（Komari 不缓存失败结果；这里留 60s 防止持续打挂的上游被重试打爆）。
+/// 空 / 失败结果的负缓存时长。
 const NEGATIVE_TTL: Duration = Duration::from_secs(60);
 
 fn jittered_ttl() -> Duration {
     Duration::from_secs(BASE_TTL_SECS - JITTER_SECS + rand_jitter_secs())
 }
 
-/// 无 rand 依赖的抖动：纳秒 ^ 秒做 xorshift 混合。
 fn rand_jitter_secs() -> u64 {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -46,7 +46,7 @@ fn rand_jitter_secs() -> u64 {
     x % (2 * JITTER_SECS)
 }
 
-/// 上游查询全局限速：相邻请求间隔 ≥ 70ms（≈14.3 req/s，恒低于 15 req/s）。
+/// 上游查询全局限速：相邻请求间隔 ≥ 70ms（≈14.3 req/s）。
 async fn acquire_query_slot() {
     static SLOT: OnceLock<Mutex<Instant>> = OnceLock::new();
     let slot = SLOT.get_or_init(|| Mutex::new(Instant::now()));
@@ -65,54 +65,215 @@ async fn acquire_query_slot() {
     }
 }
 
-/// 国家代码（按 IP 查缓存）；空串表示未知。
+/// 国家代码（同步读内存热缓存）；空串表示未知。
 pub fn region_code_for(ip: &str) -> String {
     let ip = ip.trim();
     if ip.is_empty() {
         return String::new();
     }
-    mem_read(ip).unwrap_or_default()
+    mem_read(ip).map(|(code, _)| code).unwrap_or_default()
 }
 
-/// 立即清空全部解析缓存（对齐 Komari geoCache.Flush）：
-/// 切换提供商 / 更新 mmdb 后调用，下一个 tick 全量按新源重解析。
+/// 清空内存热缓存（持久缓存由 [`GeoEngine::clear_persistent`] 清理）。
 pub fn invalidate_all() {
     if let Ok(mut map) = mem().write() {
         map.clear();
     }
 }
 
-/// 读取有效缓存条目；过期视为未命中（由下一轮 tick 重新解析）。
-fn mem_read(ip: &str) -> Option<String> {
+fn mem_read(ip: &str) -> Option<(String, String)> {
     let map = mem().read().ok()?;
     let entry = map.get(ip)?;
     if entry.expires_at <= Instant::now() {
         return None;
     }
-    Some(entry.code.clone())
+    Some((entry.code.clone(), entry.location.clone()))
 }
 
-fn mem_insert(ip: &str, code: &str, ttl: Duration) {
+fn mem_insert(ip: &str, code: &str, location: &str, ttl: Duration) {
     if let Ok(mut map) = mem().write() {
         map.insert(
             ip.to_string(),
             CacheEntry {
                 code: code.to_string(),
+                location: location.to_string(),
                 expires_at: Instant::now() + ttl,
             },
         );
     }
 }
 
-/// Starts the periodic resolver loop (60s tick).
+fn inflight() -> &'static StdMutex<HashMap<String, Arc<AsyncMutex<()>>>> {
+    static STORE: OnceLock<StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>> = OnceLock::new();
+    STORE.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// Durable, shared IP geolocation engine.
+/// 持久化、全局共享的 IP 归属地引擎。
+#[derive(Clone)]
+pub struct GeoEngine {
+    pool: DbPool,
+}
+
+impl GeoEngine {
+    pub fn new(pool: DbPool) -> Self {
+        Self { pool }
+    }
+
+    /// Resolves an IP with the configured provider, using memory then database
+    /// cache before calling the upstream provider. Concurrent misses for the
+    /// same IP are coalesced into one request.
+    /// 解析 IP：先内存、再数据库，最后上游；同 IP 并发未命中只请求一次。
+    pub async fn lookup(&self, ip: &str, provider: &str) -> Option<GeoInfo> {
+        let ip = ip.trim();
+        if ip.is_empty() || sakuio_notify::ipgeo::is_private_ip(ip) {
+            return None;
+        }
+        if let Some((code, location)) = mem_read(ip) {
+            return Some(GeoInfo {
+                country_code: code,
+                location,
+            });
+        }
+
+        let lock = {
+            let mut map = inflight()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            map.entry(ip.to_string())
+                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+                .clone()
+        };
+        let _guard = lock.lock().await;
+        if let Some((code, location)) = mem_read(ip) {
+            return Some(GeoInfo {
+                country_code: code,
+                location,
+            });
+        }
+        let now = Utc::now().timestamp();
+        if let Ok(Some(row)) = GeoCacheRepository::new(&self.pool).get(ip).await {
+            if row.expires_at > now {
+                mem_insert(ip, &row.country_code, &row.location, jittered_ttl());
+                if row.country_code.is_empty() && row.location.is_empty() {
+                    return None;
+                }
+                return Some(GeoInfo {
+                    country_code: row.country_code,
+                    location: row.location,
+                });
+            }
+        }
+
+        acquire_query_slot().await;
+        let info = sakuio_notify::ipgeo::lookup_info_with(provider, ip).await;
+        let (code, location, ttl) = match &info {
+            Some(info) if !info.country_code.is_empty() || !info.location.is_empty() => (
+                info.country_code.clone(),
+                info.location.clone(),
+                jittered_ttl(),
+            ),
+            _ => (String::new(), String::new(), NEGATIVE_TTL),
+        };
+        if let Err(error) = GeoCacheRepository::new(&self.pool)
+            .upsert(
+                ip,
+                &code,
+                &location,
+                now + ttl.as_secs() as i64,
+                &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            )
+            .await
+        {
+            tracing::warn!(ip = %ip, error = %error, "persist ip geo cache failed");
+        }
+        mem_insert(ip, &code, &location, ttl);
+        info
+    }
+
+    /// Resolves using the current site settings; used by audit enrichment.
+    pub async fn lookup_current(&self, ip: &str) -> Option<GeoInfo> {
+        let settings = crate::site_settings::load_from_pool(&self.pool).await;
+        if !settings.geoip_enabled {
+            return None;
+        }
+        self.lookup(ip, &settings.geoip_provider).await
+    }
+
+    /// Clears durable rows after GeoIP provider / MMDB changes.
+    pub async fn clear_persistent(&self) {
+        if let Err(error) = sqlx::query("DELETE FROM ip_geo_cache")
+            .execute(&self.pool)
+            .await
+        {
+            tracing::warn!(error = %error, "clear ip geo cache failed");
+        }
+    }
+
+    /// Deletes expired rows that no server currently references.
+    pub async fn cleanup_expired(&self) {
+        if let Ok(mut map) = mem().write() {
+            let now = Instant::now();
+            map.retain(|_, entry| entry.expires_at > now);
+        }
+        let Ok(rows) = ClientRepository::new(&self.pool)
+            .list_for_public_api()
+            .await
+        else {
+            return;
+        };
+        let mut referenced: HashSet<String> = HashSet::new();
+        for row in &rows {
+            for (ip, _) in client_ips(row) {
+                referenced.insert(ip);
+            }
+        }
+        let now = Utc::now().timestamp();
+        loop {
+            match GeoCacheRepository::new(&self.pool)
+                .delete_expired_unreferenced(now, &referenced, 500)
+                .await
+            {
+                Ok(0) => break,
+                Ok(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                Err(error) => {
+                    tracing::warn!(error = %error, "cleanup ip geo cache failed");
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Shared lookup used by the log-detail endpoint.
+pub async fn lookup_ip(state: &AppState, ip: &str) -> Option<GeoInfo> {
+    let settings = crate::site_settings::load(state).await;
+    if !settings.geoip_enabled {
+        return None;
+    }
+    state.geo.lookup(ip, &settings.geoip_provider).await
+}
+
+/// Starts the periodic resolver (60s tick) and cache cleanup (6h).
 pub fn spawn_geoip_resolver(state: AppState) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        let mut cleanup_ticker = tokio::time::interval(Duration::from_secs(6 * 3600));
         let mut last_provider = String::new();
         loop {
-            ticker.tick().await;
-            if let Err(e) = tick(&state, &mut last_provider).await {
-                tracing::warn!(error = %e, "geoip resolver tick failed");
+            if sakuio_db::maintenance_active() {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if let Err(e) = tick(&state, &mut last_provider).await {
+                        tracing::warn!(error = %e, "geoip resolver tick failed");
+                    }
+                }
+                _ = cleanup_ticker.tick() => {
+                    state.geo.cleanup_expired().await;
+                }
             }
         }
     });
@@ -122,18 +283,15 @@ async fn tick(state: &AppState, last_provider: &mut String) -> Result<(), String
     let settings = crate::site_settings::load(state).await;
     if !settings.geoip_enabled {
         if !last_provider.is_empty() {
-            // 关闭即整体失效；重新开启后按当前提供商重新解析
-            if let Ok(mut map) = mem().write() {
-                map.clear();
-            }
+            invalidate_all();
             last_provider.clear();
         }
         return Ok(());
     }
     if *last_provider != settings.geoip_provider {
-        // 更换提供商：全部缓存失效，按新提供商重新解析
-        if let Ok(mut map) = mem().write() {
-            map.clear();
+        if !last_provider.is_empty() {
+            invalidate_all();
+            state.geo.clear_persistent().await;
         }
         *last_provider = settings.geoip_provider.clone();
     }
@@ -142,10 +300,6 @@ async fn tick(state: &AppState, last_provider: &mut String) -> Result<(), String
         .list_for_public_api()
         .await
         .map_err(|e| e.to_string())?;
-
-    // 收集全部待解析 IP（连接地址 + basic_info 上报地址，v4/v6 一起），跳过已缓存与私网。
-    // 同时记录 ip -> (uuid, is_v6) 归属，解析成功后把国家代码写回 clients 表，
-    // 面板重启后列表直接读库渲染旗帜，无需等待重新解析。
     let mut ips: HashSet<String> = HashSet::new();
     let mut ip_targets: HashMap<String, Vec<(&str, bool)>> = HashMap::new();
     for row in &rows {
@@ -162,34 +316,24 @@ async fn tick(state: &AppState, last_provider: &mut String) -> Result<(), String
         .collect();
     pending.sort();
     for ip in &pending {
-        // 全局限速排队：节点再多也不会超过 15 req/s
-        acquire_query_slot().await;
-        let info = sakuio_notify::ipgeo::lookup_info_with(&settings.geoip_provider, ip).await;
-        match info {
-            Some(info) if !info.country_code.is_empty() => {
-                mem_insert(ip, &info.country_code, jittered_ttl());
-                // 解析成功：按 v4 / v6 归属写回 clients 表（失败 / 负缓存不写，保留旧值）
-                let repo = ClientRepository::new(&state.db);
-                for (uuid, is_v6) in ip_targets.get(ip).into_iter().flatten() {
-                    let res = repo.update_geo_regions(
-                        uuid,
-                        (!is_v6).then_some(info.country_code.as_str()),
-                        is_v6.then_some(info.country_code.as_str()),
-                    );
-                    if let Err(e) = res.await {
-                        tracing::warn!(node_uuid = %uuid, error = %e, "failed to persist geo region");
-                    }
+        let info = state.geo.lookup(ip, &settings.geoip_provider).await;
+        if let Some(info) = info.filter(|info| !info.country_code.is_empty()) {
+            let repo = ClientRepository::new(&state.db);
+            for (uuid, is_v6) in ip_targets.get(ip).into_iter().flatten() {
+                let res = repo.update_geo_regions(
+                    uuid,
+                    (!is_v6).then_some(info.country_code.as_str()),
+                    is_v6.then_some(info.country_code.as_str()),
+                );
+                if let Err(e) = res.await {
+                    tracing::warn!(node_uuid = %uuid, error = %e, "failed to persist geo region");
                 }
-            }
-            _ => {
-                mem_insert(ip, "", NEGATIVE_TTL);
             }
         }
     }
     Ok(())
 }
 
-/// 节点的全部公网候选 IP（连接地址 + basic_info 上报地址），带 v4/v6 归属标记。
 fn client_ips(row: &PublicClientRow) -> Vec<(String, bool)> {
     let mut ips = Vec::new();
     for (raw, is_v6) in [(&row.ipv4, false), (&row.ipv6, true)] {

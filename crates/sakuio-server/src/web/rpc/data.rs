@@ -13,6 +13,8 @@ pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub async fn public_settings(state: &AppState) -> Value {
     const RETENTION_HOURS: i64 = 168;
     let site = crate::site_settings::load(state).await;
+    let theme = state.theme.active().await;
+    let theme_settings = state.theme.theme_settings(&theme).await;
     json!({
         "sitename": site.site_name,
         "description": site.site_description,
@@ -32,11 +34,8 @@ pub async fn public_settings(state: &AppState) -> Value {
         "record_enabled": true,
         "record_preserve_time": RETENTION_HOURS,
         "ping_record_preserve_time": RETENTION_HOURS,
-        "theme": "default",
-        "theme_settings": {
-            "dataUpdateInterval": 3,
-            "rpcTransportMode": "websocket"
-        },
+        "theme": theme,
+        "theme_settings": theme_settings,
     })
 }
 

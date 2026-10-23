@@ -1,7 +1,7 @@
 use crate::AppState;
+use sakuio_db::DbPool;
 use sakuio_db::{task_to_public_list_json, PingRecordRow, PingRepository, PingTaskRow};
 use serde_json::{json, Map, Value};
-use sqlx::SqlitePool;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -46,7 +46,9 @@ pub async fn query_ping_records(
         .await
         .map_err(|_| (-32603, "Internal error"))?;
 
-    Ok(build_ping_response(&records, &tasks, &q, since_ms, until_ms))
+    Ok(build_ping_response(
+        &records, &tasks, &q, since_ms, until_ms,
+    ))
 }
 
 pub async fn public_ping_tasks(state: &AppState) -> Result<Value, (i32, &'static str)> {
@@ -146,7 +148,11 @@ fn ms_to_rfc3339(ms: i64) -> String {
 pub fn parse_ping_hours(params: Option<&Value>) -> i64 {
     params
         .and_then(|p| p.get("hours"))
-        .and_then(|h| h.as_str().and_then(|s| s.parse().ok()).or_else(|| h.as_i64()))
+        .and_then(|h| {
+            h.as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| h.as_i64())
+        })
         .unwrap_or(1)
 }
 
@@ -164,12 +170,10 @@ pub fn parse_ping_max_count(params: Option<&Value>) -> i32 {
 
 /// Positive id filters one task; `0`, `-1`, or omitted means all tasks (theme RPC convention).
 pub fn parse_task_id(params: Option<&Value>) -> Option<i64> {
-    let raw = params
-        .and_then(|p| p.get("task_id"))
-        .and_then(|t| {
-            t.as_i64()
-                .or_else(|| t.as_str().and_then(|s| s.parse().ok()))
-        });
+    let raw = params.and_then(|p| p.get("task_id")).and_then(|t| {
+        t.as_i64()
+            .or_else(|| t.as_str().and_then(|s| s.parse().ok()))
+    });
     match raw {
         None | Some(0) | Some(-1) => None,
         Some(id) if id > 0 => Some(id),
@@ -178,7 +182,7 @@ pub fn parse_task_id(params: Option<&Value>) -> Option<i64> {
 }
 
 /// Per-node ping stats for `common:getNodesLatestStatus` (`ping` map keyed by task id).
-pub async fn ping_stats_for_node(pool: &SqlitePool, node_uuid: &str) -> Result<Value, String> {
+pub async fn ping_stats_for_node(pool: &DbPool, node_uuid: &str) -> Result<Value, String> {
     let repo = PingRepository::new(pool);
     let tasks = repo.list_all().await.map_err(|e| e.to_string())?;
     let assigned: Vec<_> = tasks
@@ -196,10 +200,7 @@ pub async fn ping_stats_for_node(pool: &SqlitePool, node_uuid: &str) -> Result<V
         .map_err(|e| e.to_string())?;
     let mut out = Map::new();
     for task in assigned {
-        let subset: Vec<&PingRecordRow> = records
-            .iter()
-            .filter(|r| r.task_id == task.id)
-            .collect();
+        let subset: Vec<&PingRecordRow> = records.iter().filter(|r| r.task_id == task.id).collect();
         if subset.is_empty() {
             continue;
         }

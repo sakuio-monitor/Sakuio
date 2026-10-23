@@ -1,12 +1,13 @@
 use crate::AppState;
 use chrono::{TimeZone, Utc};
 use sakuio_board::{BoardStateStore, RECENT_TELEMETRY_MS};
-use sakuio_metric::MetricStore;
 use sakuio_protocol::{BasicInfoParams, TelemetrySample};
 use serde_json::{json, Value};
 
 use super::data::{load_public_clients, parse_basic, v2_report_from_snapshot};
-use super::ping::{parse_ping_hours, parse_ping_max_count, parse_task_id, query_ping_records, PingQuery};
+use super::ping::{
+    parse_ping_hours, parse_ping_max_count, parse_task_id, query_ping_records, PingQuery,
+};
 
 pub async fn common_get_node_recent_status(
     state: &AppState,
@@ -54,7 +55,9 @@ pub async fn public_get_client_recent_records(
         .filter(|s| !s.is_empty())
         .ok_or((-32602, "UUID is required"))?;
 
-    let rows = load_public_clients(state).await.map_err(|_| (-32603, "Internal error"))?;
+    let rows = load_public_clients(state)
+        .await
+        .map_err(|_| (-32603, "Internal error"))?;
     let row = rows
         .iter()
         .find(|r| r.uuid == uuid)
@@ -89,28 +92,36 @@ pub async fn public_get_records_by_uuid(
 
     let hours: i64 = p
         .get("hours")
-        .and_then(|h| h.as_str().and_then(|s| s.parse().ok()).or_else(|| h.as_i64()))
+        .and_then(|h| {
+            h.as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| h.as_i64())
+        })
         .unwrap_or(4);
     let hours = hours.clamp(1, 168);
 
-    let load_type = p
-        .get("load_type")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let load_type = p.get("load_type").and_then(|t| t.as_str()).unwrap_or("");
 
     let until_ms = Utc::now().timestamp_millis();
     let since_ms = until_ms - hours * 3_600_000;
 
-    let store = MetricStore::new(state.db.clone());
+    // 原始采样只在内存保留约 10 分钟；更久的数据读降采样桶。
+    // 窗口选择：≤1h 用 1 分钟桶，≤24h 用 5 分钟桶，其余用 1 小时桶。
+    let bucket_seconds = if hours <= 1 {
+        60
+    } else if hours <= 24 {
+        300
+    } else {
+        3600
+    };
+
+    let store = state.metric.current_store().await;
     let rows = store
-        .list_samples(Some(uuid), since_ms, until_ms, 10_000)
+        .list_buckets(uuid, bucket_seconds, since_ms, until_ms, 50_000)
         .await
         .map_err(|_| (-32603, "Internal error"))?;
 
-    let records: Vec<Value> = rows
-        .iter()
-        .map(|(_, s)| sample_to_load_record(uuid, s))
-        .collect();
+    let records: Vec<Value> = buckets_to_records(uuid, bucket_seconds, &rows, since_ms);
 
     if !load_type.is_empty() && load_type != "all" {
         let filtered = filter_by_load_type(&records, load_type);
@@ -170,16 +181,53 @@ pub async fn common_get_records(
         .and_then(|p| p.get("maxCount"))
         .and_then(|c| c.as_i64())
         .unwrap_or(4000);
-    let max_count = if max_count == -1 { 50_000 } else { max_count.clamp(1, 50_000) };
+    let max_count = if max_count == -1 {
+        50_000
+    } else {
+        max_count.clamp(1, 50_000)
+    };
 
     let until_ms = Utc::now().timestamp_millis();
     let since_ms = until_ms - hours * 3_600_000;
 
-    let store = MetricStore::new(state.db.clone());
-    let rows = store
-        .list_samples(uuid, since_ms, until_ms, max_count as i32)
-        .await
-        .map_err(|_| (-32603, "Internal error"))?;
+    // 原始采样只在内存（board）保留约 10 分钟；更久读降采样桶。
+    let bucket_seconds = if hours <= 1 {
+        60
+    } else if hours <= 24 {
+        300
+    } else {
+        3600
+    };
+
+    let store = state.metric.current_store().await;
+    let node_list: Vec<String> = match uuid {
+        Some(u) => vec![u.to_string()],
+        None => load_public_clients(state)
+            .await
+            .map_err(|_| (-32603, "Internal error"))?
+            .iter()
+            .map(|c| c.uuid.clone())
+            .collect(),
+    };
+
+    let mut grouped: std::collections::HashMap<String, Vec<Value>> =
+        std::collections::HashMap::new();
+    let per_node_limit = if uuid.is_some() {
+        max_count as i64
+    } else {
+        5_000
+    };
+    for client in &node_list {
+        let Ok(node_rows) = store
+            .list_buckets(client, bucket_seconds, since_ms, until_ms, per_node_limit)
+            .await
+        else {
+            continue;
+        };
+        for rec in buckets_to_records(client, bucket_seconds, &node_rows, since_ms) {
+            grouped.entry(client.clone()).or_default().push(rec);
+        }
+    }
 
     let load_type = params
         .and_then(|p| p.get("load_type"))
@@ -187,30 +235,29 @@ pub async fn common_get_records(
         .unwrap_or("");
 
     if !load_type.is_empty() && load_type != "all" {
-        let mut grouped: std::collections::HashMap<String, Vec<Value>> =
+        let mut flat: std::collections::HashMap<String, Vec<Value>> =
             std::collections::HashMap::new();
-        for (client, sample) in &rows {
-            let rec = sample_to_flat_record(client, sample, load_type);
-            grouped.entry(client.clone()).or_default().push(rec);
+        for (client, records) in &grouped {
+            for rec in records {
+                let Some(rec) = rec.as_object() else { continue };
+                let key = load_type_field(load_type);
+                flat.entry(client.clone()).or_default().push(json!({
+                    "client": client,
+                    "time": rec.get("time").cloned().unwrap_or(Value::Null),
+                    "value": rec.get(key).cloned().unwrap_or(Value::Null),
+                }));
+            }
         }
-        let total: usize = grouped.values().map(|v| v.len()).sum();
+        let total: usize = flat.values().map(|v| v.len()).sum();
         return Ok(json!({
             "count": total,
-            "records": grouped,
+            "records": flat,
             "load_type": load_type,
             "from": ms_to_rfc3339(since_ms),
             "to": ms_to_rfc3339(until_ms),
         }));
     }
 
-    let mut grouped: std::collections::HashMap<String, Vec<Value>> =
-        std::collections::HashMap::new();
-    for (client, sample) in &rows {
-        grouped
-            .entry(client.clone())
-            .or_default()
-            .push(sample_to_load_record(client, sample));
-    }
     let total: usize = grouped.values().map(|v| v.len()).sum();
     Ok(json!({
         "count": total,
@@ -251,6 +298,101 @@ fn ms_to_rfc3339(ms: i64) -> String {
         .unwrap_or_else(|| Utc::now().to_rfc3339())
 }
 
+/// Re-assembles bucket rows into chart records (one point per bucket slot).
+/// 桶行重组为图表记录：每个桶时刻一个点，指标 key 映射回字段名。
+fn buckets_to_records(
+    client: &str,
+    bucket_seconds: i64,
+    rows: &[sakuio_metric::BucketRow],
+    _since_ms: i64,
+) -> Vec<Value> {
+    use std::collections::BTreeMap;
+    let mut by_slot: BTreeMap<i64, BTreeMap<&str, f64>> = BTreeMap::new();
+    for row in rows {
+        let slot = row.bucket_start_ms + bucket_seconds * 1000;
+        by_slot
+            .entry(slot)
+            .or_default()
+            .insert(metric_field(row.metric_key.as_str()), row.avg_val);
+    }
+    by_slot
+        .into_iter()
+        .map(|(slot, values)| {
+            let mut rec = json!({
+                "client": client,
+                "time": ms_to_rfc3339(slot),
+            });
+            let cpu = values.get("cpu").copied().unwrap_or(0.0);
+            let obj = rec.as_object_mut().unwrap();
+            for (field, value) in &values {
+                let v = match *field {
+                    "ram" | "swap" | "disk" | "net_in" | "net_out" | "process" => {
+                        json!(*value as i64)
+                    }
+                    _ => json!(*value as f32),
+                };
+                obj.insert((*field).into(), v);
+            }
+            obj.entry("cpu").or_insert_with(|| json!(cpu as f32));
+            rec
+        })
+        .collect()
+}
+
+/// Maps a `load_type` query value to its chart record field.
+/// `load_type` 查询值到图表字段的映射。
+fn load_type_field(load_type: &str) -> &'static str {
+    match load_type {
+        "gpu" => "gpu",
+        "ram" => "ram",
+        "swap" => "swap",
+        "load" => "load",
+        "temp" => "temp",
+        "disk" => "disk",
+        "network" => "net_in",
+        "process" => "process",
+        "connections" => "connections",
+        _ => "cpu",
+    }
+}
+
+/// Projects full records down to `{client, time, value}` for one load type.
+/// 将完整记录投影为单一负载类型的 `{client, time, value}`。
+fn filter_by_load_type(records: &[Value], load_type: &str) -> Vec<Value> {
+    let key = load_type_field(load_type);
+    records
+        .iter()
+        .filter_map(|rec| rec.as_object())
+        .map(|rec| {
+            json!({
+                "client": rec.get("client").cloned().unwrap_or(Value::Null),
+                "time": rec.get("time").cloned().unwrap_or(Value::Null),
+                "value": rec.get(key).cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect()
+}
+
+/// Maps a metric key to its chart record field.
+/// 指标 key 到图表字段的映射。
+fn metric_field(key: &str) -> &'static str {
+    match key {
+        "cpu.usage" => "cpu",
+        "memory.used" => "ram",
+        "swap.used" => "swap",
+        "load.average" => "load",
+        "disk.used" => "disk",
+        "net.in.rate" => "net_in",
+        "net.out.rate" => "net_out",
+        "process.count" => "process",
+        "gpu.usage" => "gpu",
+        "gpu.temperature" => "temp",
+        "connections.tcp" => "connections_tcp",
+        "connections.udp" => "connections_udp",
+        _ => "",
+    }
+}
+
 fn sample_to_status_record(client: &str, s: &TelemetrySample) -> Value {
     let gpu = gpu_usage(s);
     json!({
@@ -276,61 +418,6 @@ fn sample_to_status_record(client: &str, s: &TelemetrySample) -> Value {
         "connections": s.connections.tcp + s.connections.udp,
         "connections_udp": s.connections.udp,
     })
-}
-
-fn sample_to_load_record(client: &str, s: &TelemetrySample) -> Value {
-    sample_to_status_record(client, s)
-}
-
-fn sample_to_flat_record(client: &str, s: &TelemetrySample, load_type: &str) -> Value {
-    let full = sample_to_status_record(client, s);
-    let mut out = json!({
-        "client": client,
-        "time": full.get("time").cloned().unwrap_or(Value::Null),
-    });
-    let key = match load_type {
-        "cpu" => "cpu",
-        "gpu" => "gpu",
-        "ram" => "ram",
-        "swap" => "swap",
-        "load" => "load",
-        "temp" => "temp",
-        "disk" => "disk",
-        "network" => "net_in",
-        "process" => "process",
-        "connections" => "connections",
-        _ => "cpu",
-    };
-    if let Some(v) = full.get(key) {
-        out.as_object_mut().unwrap().insert("value".into(), v.clone());
-    }
-    out
-}
-
-fn filter_by_load_type(records: &[Value], load_type: &str) -> Vec<Value> {
-    records
-        .iter()
-        .filter_map(|r| {
-            let key = match load_type {
-                "cpu" => "cpu",
-                "gpu" => "gpu",
-                "ram" => "ram",
-                "swap" => "swap",
-                "load" => "load",
-                "temp" => "temp",
-                "disk" => "disk",
-                "network" => "net_in",
-                "process" => "process",
-                "connections" => "connections",
-                _ => return None,
-            };
-            Some(json!({
-                "client": r.get("client"),
-                "time": r.get("time"),
-                "value": r.get(key).cloned().unwrap_or(Value::Null),
-            }))
-        })
-        .collect()
 }
 
 fn gpu_usage(s: &TelemetrySample) -> f32 {

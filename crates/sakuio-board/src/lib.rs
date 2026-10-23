@@ -10,7 +10,7 @@ mod state;
 mod transport;
 
 pub use frame::BoardFrame;
-pub use memory::MemoryBoardStore;
+pub use memory::{BoardMemoryStats, MemoryBoardStore};
 pub use registry::{BoardTransportRegistry, TransportPlugin};
 pub use relay::RelayKind;
 pub use session::{BoardSession, BoardSessionHandler, SharedBoardSessionHandler};

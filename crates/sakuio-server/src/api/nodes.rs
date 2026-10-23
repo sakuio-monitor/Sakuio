@@ -8,6 +8,7 @@ use axum::{
 };
 use sakuio_board::BoardStateStore;
 use sakuio_db::{AdminClientPatch, ClientRepository, NewClient, PingRepository};
+use sakuio_protocol::{ConfigParams, ControlMessage, ControlOp};
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::time::Duration;
@@ -105,7 +106,7 @@ pub async fn list_admin_clients(
                 "items": page.items,
                 "next_cursor": page.next_cursor,
             }))
-                .into_response()
+            .into_response()
         }
         Err(e) => {
             tracing::error!(error = %e, "list admin clients failed");
@@ -215,11 +216,12 @@ pub async fn add_client(
     Json(body): Json<AddClientBody>,
 ) -> impl IntoResponse {
     let repo = ClientRepository::new(&state.db);
-    match repo.insert(&NewClient {
-        name: body.name.clone(),
-        token: body.token,
-    })
-    .await
+    match repo
+        .insert(&NewClient {
+            name: body.name.clone(),
+            token: body.token,
+        })
+        .await
     {
         Ok((uuid, token)) => {
             let ping_repo = PingRepository::new(&state.db);
@@ -247,8 +249,26 @@ pub async fn patch_admin_client(
     Json(body): Json<AdminClientPatch>,
 ) -> impl IntoResponse {
     let repo = ClientRepository::new(&state.db);
+    let push_interval = body.report_interval_ms;
     match repo.patch_admin(&uuid, &body).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            // Apply a new report interval to a live session immediately; an
+            // offline node receives it in the next welcome.
+            // 在线会话立即下发新间隔；离线节点在下次 welcome 生效。
+            if let Some(interval_ms) = push_interval {
+                let interval_ms = interval_ms.clamp(200, 3_600_000) as u64;
+                let message = ControlMessage::new(
+                    ControlOp::Config,
+                    serde_json::to_value(ConfigParams {
+                        telemetry_interval_ms: interval_ms,
+                    })
+                    .unwrap_or(serde_json::Value::Null),
+                );
+                let pushed = state.command_bus.push(&uuid, message).await;
+                tracing::info!(uuid = %uuid, interval_ms, pushed, "report interval update pushed");
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "message": "client not found" })),
@@ -329,7 +349,10 @@ pub async fn reorder_client(
     Json(body): Json<ReorderClientBody>,
 ) -> impl IntoResponse {
     let repo = ClientRepository::new(&state.db);
-    match repo.reorder_client(&body.uuid, body.before.as_deref()).await {
+    match repo
+        .reorder_client(&body.uuid, body.before.as_deref())
+        .await
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             tracing::error!(error = %e, uuid = %body.uuid, "reorder client failed");

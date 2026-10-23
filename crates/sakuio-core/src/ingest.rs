@@ -70,7 +70,17 @@ impl IngestPipeline {
         node_uuid: &str,
         batch: &TelemetryBatch,
     ) -> Result<(), StateError> {
-        batch.validate().map_err(|e| StateError::Message(e.to_string()))?;
+        // Drop telemetry while the main database is being copied; the agent
+        // keeps a bounded retry queue and resumes after the switch.
+        // 主库复制期间丢弃遥测；Agent 有有界重试队列，切换完成后恢复。
+        if sakuio_db::maintenance_active() {
+            return Err(StateError::Message(
+                "database maintenance in progress".into(),
+            ));
+        }
+        batch
+            .validate()
+            .map_err(|e| StateError::Message(e.to_string()))?;
         if let Some(sample) = batch.samples.last() {
             let snap = snapshot_from_sample(node_uuid, sample);
             self.board

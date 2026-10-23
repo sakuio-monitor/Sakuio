@@ -77,6 +77,14 @@ impl Slot {
     }
 }
 
+/// Approximate relay socket occupancy for the profiling page.
+/// 供性能分析页面使用的中继连接占用估算。
+#[derive(Debug, Clone, Default)]
+pub struct RelayStats {
+    pub sessions: u64,
+    pub buffered_bytes: u64,
+}
+
 #[derive(Clone, Default)]
 pub struct RelayBroker {
     inner: Arc<RwLock<HashMap<String, Slot>>>,
@@ -85,6 +93,30 @@ pub struct RelayBroker {
 impl RelayBroker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub async fn stats(&self) -> RelayStats {
+        let guard = self.inner.read().await;
+        let mut stats = RelayStats::default();
+        for slot in guard.values() {
+            if slot.to_agent.is_some() || slot.to_client.is_some() {
+                stats.sessions += 1;
+            }
+            stats.buffered_bytes += slot
+                .pending_to_client
+                .iter()
+                .map(|bytes| bytes.len() as u64)
+                .sum::<u64>();
+            stats.buffered_bytes += slot
+                .pending_to_agent
+                .iter()
+                .map(|inbound| match inbound {
+                    AgentInbound::Stdin(bytes) => bytes.len() as u64,
+                    AgentInbound::Resize(text) => text.len() as u64,
+                })
+                .sum::<u64>();
+        }
+        stats
     }
 
     pub async fn register(&self, relay_id: String) {
@@ -96,9 +128,7 @@ impl RelayBroker {
     pub async fn open_client_download(&self, relay_id: &str) -> mpsc::Receiver<Vec<u8>> {
         let (tx, rx) = mpsc::channel::<Vec<u8>>(CHANNEL_CAP);
         let mut guard = self.inner.write().await;
-        let slot = guard
-            .entry(relay_id.to_string())
-            .or_insert_with(Slot::new);
+        let slot = guard.entry(relay_id.to_string()).or_insert_with(Slot::new);
         slot.to_client = Some(tx);
         rx
     }
@@ -106,9 +136,7 @@ impl RelayBroker {
     pub async fn bind_upload_feed(&self, relay_id: &str) -> mpsc::Sender<Vec<u8>> {
         let (tx, rx) = mpsc::channel::<Vec<u8>>(CHANNEL_CAP);
         let mut guard = self.inner.write().await;
-        let slot = guard
-            .entry(relay_id.to_string())
-            .or_insert_with(Slot::new);
+        let slot = guard.entry(relay_id.to_string()).or_insert_with(Slot::new);
         slot.pending_upload_rx = Some(rx);
         tx
     }
@@ -135,9 +163,7 @@ impl RelayBroker {
 
         let mut pending_upload_rx = {
             let mut guard = self.inner.write().await;
-            let slot = guard
-                .entry(relay_id.to_string())
-                .or_insert_with(Slot::new);
+            let slot = guard.entry(relay_id.to_string()).or_insert_with(Slot::new);
             slot.to_agent = Some(to_agent_tx.clone());
             let pending = std::mem::take(&mut slot.pending_to_agent);
             let upload = slot.pending_upload_rx.take();
@@ -224,9 +250,7 @@ impl RelayBroker {
 
         let pending_out = {
             let mut guard = self.inner.write().await;
-            let slot = guard
-                .entry(relay_id.to_string())
-                .or_insert_with(Slot::new);
+            let slot = guard.entry(relay_id.to_string()).or_insert_with(Slot::new);
             slot.to_client = Some(to_client_tx.clone());
             std::mem::take(&mut slot.pending_to_client)
         };

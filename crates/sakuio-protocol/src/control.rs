@@ -14,6 +14,9 @@ pub enum ControlOp {
     Welcome,
     Heartbeat,
     BasicInfo,
+    /// Board-initiated runtime configuration update.
+    /// 面板发起的运行时配置更新。
+    Config,
     Cmd,
     CmdResult,
     TelemetryAck,
@@ -112,10 +115,29 @@ pub struct WelcomeParams {
     /// 服务端分配的节点 token（自动发现注册时下发）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_token: Option<String>,
+    /// Telemetry collection/report interval in milliseconds (1000 = 1s).
+    /// 遥测采集/上报间隔（毫秒，1000 = 1 秒）。
+    #[serde(default = "default_telemetry_interval_ms")]
+    pub telemetry_interval_ms: u64,
     /// Compatible agent version range advertised by the board.
     /// 面板声明的兼容 Agent 版本区间，自动更新以此为上界。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_version_range: Option<AgentVersionRange>,
+}
+
+/// Default telemetry interval when the board does not send one.
+/// 面板未下发时的默认遥测间隔。
+pub const DEFAULT_TELEMETRY_INTERVAL_MS: u64 = 1000;
+
+fn default_telemetry_interval_ms() -> u64 {
+    DEFAULT_TELEMETRY_INTERVAL_MS
+}
+
+/// Runtime configuration pushed by the board (`op = "config"`).
+/// 面板下发的运行时配置（`op = "config"`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigParams {
+    pub telemetry_interval_ms: u64,
 }
 
 /// Static host information reported by the agent at connect time.

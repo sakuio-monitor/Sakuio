@@ -46,6 +46,12 @@ pub struct SiteSettings {
     pub geoip_mmdb_url: String,
     #[serde(default)]
     pub auto_discovery_generated: bool,
+    #[serde(default = "default_audit_retention_days")]
+    pub audit_retention_days: i64,
+}
+
+fn default_audit_retention_days() -> i64 {
+    180
 }
 
 fn default_geoip_enabled() -> bool {
@@ -78,6 +84,7 @@ impl Default for SiteSettings {
             geoip_provider: default_geoip_provider(),
             geoip_mmdb_url: String::new(),
             auto_discovery_generated: false,
+            audit_retention_days: default_audit_retention_days(),
         }
     }
 }
@@ -111,12 +118,23 @@ pub async fn bootstrap_defaults(state: &AppState) {
 
 /// Loads site settings from `system_settings`, falling back to defaults.
 pub async fn load(state: &AppState) -> SiteSettings {
-    SettingsRepository::new(&state.db)
+    load_from_pool(&state.db).await
+}
+
+pub async fn load_from_pool(pool: &sakuio_db::DbPool) -> SiteSettings {
+    SettingsRepository::new(pool)
         .get_json::<SiteSettings>(SETTINGS_KEY)
         .await
         .ok()
         .flatten()
         .unwrap_or_default()
+}
+
+pub async fn save_to_pool(pool: &sakuio_db::DbPool, settings: &SiteSettings) -> Result<(), String> {
+    SettingsRepository::new(pool)
+        .set_json(SETTINGS_KEY, settings)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 async fn save(state: &AppState, settings: &SiteSettings) -> Result<(), StatusCode> {
@@ -162,11 +180,7 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 /// CORS / WebSocket Origin guard for all public routes.
-pub async fn origin_guard(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Response {
+pub async fn origin_guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let settings = load(&state).await;
     if !settings.cors_origin_check_enabled && !settings.ws_origin_check_enabled {
         return next.run(request).await;
@@ -233,7 +247,8 @@ pub async fn private_site_layer(
         }
     }
     if !settings.share_token.is_empty()
-        && cookie_value(request.headers(), SHARE_COOKIE).as_deref() == Some(settings.share_token.as_str())
+        && cookie_value(request.headers(), SHARE_COOKIE).as_deref()
+            == Some(settings.share_token.as_str())
     {
         return next.run(request).await;
     }
@@ -274,6 +289,9 @@ pub async fn put_site_settings(
     Json(body): Json<SiteSettingsBody>,
 ) -> Response {
     let mut settings = load(&state).await;
+    let previous_retention = settings.audit_retention_days;
+    let previous_geo_provider = settings.geoip_provider.clone();
+    let previous_mmdb_url = settings.geoip_mmdb_url.clone();
     if let Some(v) = body.site_name {
         settings.site_name = v.trim().to_string();
     }
@@ -325,10 +343,37 @@ pub async fn put_site_settings(
     if let Some(v) = body.geoip_mmdb_url {
         settings.geoip_mmdb_url = v.trim().to_string();
     }
+    if let Some(v) = body.audit_retention_days {
+        if !matches!(v, 0 | 7 | 14 | 30 | 180 | 365) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "message": "invalid audit retention" })),
+            )
+                .into_response();
+        }
+        settings.audit_retention_days = v;
+    }
     sakuio_notify::ipgeo::clear_cache();
     crate::geoip_resolver::invalidate_all();
+    let geo_source_changed = settings.geoip_provider != previous_geo_provider
+        || settings.geoip_mmdb_url != previous_mmdb_url;
     match save(&state, &settings).await {
-        Ok(()) => Json(json!({ "settings": settings })).into_response(),
+        Ok(()) => {
+            if geo_source_changed {
+                state.geo.clear_persistent().await;
+            }
+            let retention = settings.audit_retention_days;
+            if retention > 0
+                && retention != previous_retention
+                && (previous_retention == 0 || retention < previous_retention)
+            {
+                let pool = state.db.clone();
+                tokio::spawn(async move {
+                    crate::audit::prune_older_than(&pool, retention).await;
+                });
+            }
+            Json(json!({ "settings": settings })).into_response()
+        }
         Err(status) => api_error_db(status),
     }
 }
@@ -376,7 +421,11 @@ pub async fn download_backup(State(state): State<AppState>, _admin: AdminUser) -
 
 /// POST `/api/admin/settings/restore` — upload a backup; hot-applied immediately.
 /// 流程：关闭连接池 → 换库文件 → 重新拉起进程。
-pub async fn restore_backup(State(state): State<AppState>, _admin: AdminUser, body: Bytes) -> Response {
+pub async fn restore_backup(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    body: Bytes,
+) -> Response {
     if body.is_empty() || !body.starts_with(b"SQLite format 3\x00") {
         return api_error_db(StatusCode::BAD_REQUEST);
     }
@@ -521,4 +570,5 @@ pub struct SiteSettingsBody {
     pub geoip_enabled: Option<bool>,
     pub geoip_provider: Option<String>,
     pub geoip_mmdb_url: Option<String>,
+    pub audit_retention_days: Option<i64>,
 }

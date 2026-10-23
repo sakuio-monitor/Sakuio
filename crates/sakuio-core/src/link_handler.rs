@@ -1,14 +1,14 @@
 use async_trait::async_trait;
 use sakuio_board::{BoardSessionHandler, BoardStateStore, CommandCursor, StateError};
 use sakuio_db::ClientRepository;
+use sakuio_db::DbPool;
+use sakuio_db::{ExecRepository, PingRepository};
 use sakuio_metric::MetricWriter;
 use sakuio_protocol::{
     AgentPingResultParams, BasicInfoParams, ControlMessage, ControlOp, HelloParams,
     RemoteExecResultParams, SyncReqParams, SyncRespParams, TelemetryBatch, WelcomeParams,
     METHOD_AGENT_PING_RESULT, METHOD_REMOTE_EXEC_RESULT,
 };
-use sakuio_db::{ExecRepository, PingRepository};
-use sqlx::SqlitePool;
 use std::{sync::Arc, time::Duration};
 
 use crate::ingest::IngestPipeline;
@@ -21,7 +21,7 @@ const SYNC_READ_LIMIT: u32 = 64;
 /// Handles SakuLink control and telemetry for one board transport.
 /// 处理单一板级传输上的 SakuLink 控制与遥测。
 pub struct LinkSessionHandler {
-    db: SqlitePool,
+    db: DbPool,
     board: Arc<dyn BoardStateStore>,
     ingest: IngestPipeline,
     remote: Option<Arc<RemoteHub>>,
@@ -30,11 +30,7 @@ pub struct LinkSessionHandler {
 impl LinkSessionHandler {
     /// Builds a handler with DB, board store, and metric writer.
     /// 使用数据库、board 存储与指标写入器构造处理器。
-    pub fn new(
-        db: SqlitePool,
-        board: Arc<dyn BoardStateStore>,
-        metrics: Arc<MetricWriter>,
-    ) -> Self {
+    pub fn new(db: DbPool, board: Arc<dyn BoardStateStore>, metrics: Arc<MetricWriter>) -> Self {
         let ingest = IngestPipeline::new(board.clone(), metrics, SNAPSHOT_TTL);
         Self {
             db,
@@ -52,7 +48,7 @@ impl LinkSessionHandler {
     /// Convenience constructor for v1 single-process deployments.
     /// v1 单进程部署的便捷构造方式。
     pub fn with_memory_board(
-        db: SqlitePool,
+        db: DbPool,
         board: Arc<dyn BoardStateStore>,
         metrics: Arc<MetricWriter>,
     ) -> Self {
@@ -63,8 +59,15 @@ impl LinkSessionHandler {
 #[async_trait]
 impl BoardSessionHandler for LinkSessionHandler {
     async fn on_connect(&self, node_uuid: String, session_id: String) -> Result<(), String> {
+        if sakuio_db::maintenance_active() {
+            return Err("server maintenance in progress".into());
+        }
         let clients = ClientRepository::new(&self.db);
-        if clients.is_disabled(&node_uuid).await.map_err(|e| e.to_string())? {
+        if clients
+            .is_disabled(&node_uuid)
+            .await
+            .map_err(|e| e.to_string())?
+        {
             tracing::warn!(node_uuid = %node_uuid, "agent link rejected: client disabled");
             return Err("client disabled".into());
         }
@@ -85,17 +88,22 @@ impl BoardSessionHandler for LinkSessionHandler {
             session_id = %session_id,
             "agent board session established"
         );
+        audit_presence(&self.db, &node_uuid, true, "agent connected");
         Ok(())
     }
 
     async fn on_disconnect(&self, node_uuid: String, session_id: String) {
-        let clients = ClientRepository::new(&self.db);
-        if let Err(e) = clients.set_online(&node_uuid, false).await {
-            tracing::warn!(
-                node_uuid = %node_uuid,
-                error = %e,
-                "failed to mark client offline"
-            );
+        // Do not write the online flag while the main database is being copied.
+        // 主库复制期间不写在线标记。
+        if !sakuio_db::maintenance_active() {
+            let clients = ClientRepository::new(&self.db);
+            if let Err(e) = clients.set_online(&node_uuid, false).await {
+                tracing::warn!(
+                    node_uuid = %node_uuid,
+                    error = %e,
+                    "failed to mark client offline"
+                );
+            }
         }
         if let Err(e) = self.board.clear_presence(&node_uuid, &session_id).await {
             tracing::warn!(
@@ -117,6 +125,9 @@ impl BoardSessionHandler for LinkSessionHandler {
             session_id = %session_id,
             "agent board session closed"
         );
+        if !sakuio_db::maintenance_active() {
+            audit_presence(&self.db, &node_uuid, false, "agent disconnected");
+        }
     }
 
     async fn on_control(
@@ -143,11 +154,19 @@ impl BoardSessionHandler for LinkSessionHandler {
                     agent_version = %params.agent_version,
                     "received hello"
                 );
+                let interval_ms = clients
+                    .report_interval_ms(node_uuid)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(sakuio_protocol::DEFAULT_TELEMETRY_INTERVAL_MS as i64)
+                    .clamp(200, 3_600_000) as u64;
                 let welcome = WelcomeParams {
                     session_id: session_id.to_string(),
                     server_time_ms: chrono::Utc::now().timestamp_millis(),
                     node_uuid: node_uuid.to_string(),
                     node_token: clients.token_by_uuid(node_uuid).await.ok().flatten(),
+                    telemetry_interval_ms: interval_ms,
                     agent_version_range: Some(sakuio_protocol::AgentVersionRange {
                         min: sakuio_protocol::AGENT_VERSION_RANGE_MIN.to_string(),
                         max: sakuio_protocol::AGENT_VERSION_RANGE_MAX.to_string(),
@@ -305,10 +324,7 @@ fn state_err(e: StateError) -> String {
 
 impl LinkSessionHandler {
     async fn ingest_exec_result(&self, payload: &serde_json::Value) -> Result<(), String> {
-        let method = payload
-            .get("method")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let method = payload.get("method").and_then(|v| v.as_str()).unwrap_or("");
         if method != METHOD_REMOTE_EXEC_RESULT {
             return Ok(());
         }
@@ -325,7 +341,11 @@ impl LinkSessionHandler {
             .map_err(|e| e.to_string())
     }
 
-    async fn ingest_ping_result(&self, node_uuid: &str, payload: &serde_json::Value) -> Result<(), String> {
+    async fn ingest_ping_result(
+        &self,
+        node_uuid: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
         let method = payload
             .get("method")
             .and_then(|v| v.as_str())
@@ -348,9 +368,53 @@ impl LinkSessionHandler {
             .map(|t| t.timestamp_millis())
             .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis());
         PingRepository::new(&self.db)
-            .insert_record(node_uuid, params.task_id as i64, params.value, observed_at_ms)
+            .insert_record(
+                node_uuid,
+                params.task_id as i64,
+                params.value,
+                observed_at_ms,
+            )
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+fn audit_presence(db: &DbPool, node_uuid: &str, online: bool, reason: &'static str) {
+    let db = db.clone();
+    let node_uuid = node_uuid.to_string();
+    let action = if online {
+        "SERVER_ONLINE"
+    } else {
+        "SERVER_OFFLINE"
+    };
+    tokio::spawn(async move {
+        let ip = ClientRepository::new(&db)
+            .address_by_uuid(&node_uuid)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let geo = sakuio_db::GeoCacheRepository::new(&db)
+            .get(&ip)
+            .await
+            .ok()
+            .flatten();
+        let (geo_code, geo_location) = geo
+            .map(|row| (row.country_code, row.location))
+            .unwrap_or_default();
+        if let Err(error) = sakuio_db::record_system_event(
+            &db,
+            action,
+            &node_uuid,
+            reason,
+            &ip,
+            &geo_code,
+            &geo_location,
+        )
+        .await
+        {
+            tracing::warn!(node_uuid = %node_uuid, error = %error, "presence audit write failed");
+        }
+    });
 }

@@ -65,6 +65,7 @@ pub async fn exec_task(
 
     let clients_repo = ClientRepository::new(&state.db);
     let mut dispatched = Vec::new();
+    let mut undispatched = Vec::new();
 
     for uuid in &body.clients {
         exec_repo
@@ -78,6 +79,7 @@ pub async fn exec_task(
                 let _ = exec_repo
                     .finish_result(&task_id, uuid, "Unknown client", -1)
                     .await;
+                undispatched.push(uuid.clone());
                 continue;
             }
         };
@@ -98,12 +100,7 @@ pub async fn exec_task(
 
         match state
             .remote
-            .push_exec(
-                state.board.as_ref(),
-                &state.command_bus,
-                uuid,
-                open,
-            )
+            .push_exec(state.board.as_ref(), &state.command_bus, uuid, open)
             .await
         {
             Ok(()) => dispatched.push(uuid.clone()),
@@ -112,12 +109,14 @@ pub async fn exec_task(
                     .finish_result(&task_id, uuid, "Client offline", -1)
                     .await;
                 state.exec_streams.remove(&task_id, uuid).await;
+                undispatched.push(uuid.clone());
             }
             Err(_) => {
                 let _ = exec_repo
                     .finish_result(&task_id, uuid, "Failed to dispatch exec", -1)
                     .await;
                 state.exec_streams.remove(&task_id, uuid).await;
+                undispatched.push(uuid.clone());
             }
         }
     }
@@ -126,6 +125,7 @@ pub async fn exec_task(
         "success": true,
         "task_id": task_id,
         "clients": dispatched,
+        "undispatched": undispatched,
     })))
 }
 

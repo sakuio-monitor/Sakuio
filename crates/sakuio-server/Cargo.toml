@@ -18,6 +18,19 @@ cookie = "0.18"
 uuid.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+hex.workspace = true
+mime_guess.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+sha1 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+md-5 = "0.10"
+encoding_rs = "0.8"
+percent-encoding = "2.3"
+quick-xml = "0.38"
+url.workspace = true
+zip.workspace = true
 sakuio-board.workspace = true
 sakuio-protocol.workspace = true
 sakuio-core.workspace = true
@@ -27,8 +40,13 @@ sakuio-transport-ws.workspace = true
 sakuio-notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sysinfo = "0.33.1"
+inventory = "=0.3.19"
 sqlx.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tower.workspace = true

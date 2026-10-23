@@ -24,6 +24,8 @@ struct GeoJsResponse {
     #[serde(default)]
     country_code: Option<String>,
     #[serde(default)]
+    region: Option<String>,
+    #[serde(default)]
     city: Option<String>,
 }
 
@@ -33,8 +35,12 @@ struct IpApiResponse {
     country: Option<String>,
     #[serde(default, rename = "countryCode")]
     country_code: Option<String>,
+    #[serde(default, rename = "regionName")]
+    region_name: Option<String>,
     #[serde(default)]
     city: Option<String>,
+    #[serde(default)]
+    district: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -55,6 +61,10 @@ struct Ip9Data {
     prov: Option<String>,
     #[serde(default)]
     city: Option<String>,
+    #[serde(default)]
+    area: Option<String>,
+    #[serde(default)]
+    district: Option<String>,
 }
 
 fn cache() -> &'static Mutex<HashMap<String, (Option<GeoInfo>, std::time::Instant)>> {
@@ -63,22 +73,46 @@ fn cache() -> &'static Mutex<HashMap<String, (Option<GeoInfo>, std::time::Instan
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Returns whether the address is loopback / private / link-local.
+/// Returns whether the address is loopback / private / link-local / reserved.
+/// Parses the address instead of string prefixes so addresses such as
+/// `172.200.1.1` are not mistaken for RFC1918 space.
 pub fn is_private_ip(ip: &str) -> bool {
-    let ip = ip.trim();
-    ip.is_empty()
-        || ip.starts_with("127.")
-        || ip.starts_with("10.")
-        || ip.starts_with("192.168.")
-        || ip.starts_with("172.16.")
-        || ip.starts_with("172.17.")
-        || ip.starts_with("172.18.")
-        || ip.starts_with("172.19.")
-        || ip.starts_with("172.2")
-        || ip.starts_with("172.30.")
-        || ip.starts_with("172.31.")
-        || ip == "::1"
-        || ip.starts_with("fe80:")
+    let Ok(address) = ip.trim().parse::<std::net::IpAddr>() else {
+        return ip.trim().is_empty();
+    };
+    match address {
+        std::net::IpAddr::V4(v4) => is_reserved_v4(v4),
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_reserved_v4(v4);
+            }
+            let segments = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        }
+    }
+}
+
+fn is_reserved_v4(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || a == 0
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 192 && b == 0 && (c == 0 || c == 2))
+        || (a == 192 && b == 88 && c == 99)
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 240
 }
 
 /// Resolves the approximate location ("国家 城市") via geojs.io (default provider).
@@ -133,7 +167,11 @@ const FAILURE_TTL: Duration = Duration::from_secs(10);
 fn cached_valid(key: &str) -> Option<Option<GeoInfo>> {
     let c = cache().lock().ok()?;
     let (entry, at) = c.get(key)?;
-    let ttl = if entry.is_some() { SUCCESS_TTL } else { FAILURE_TTL };
+    let ttl = if entry.is_some() {
+        SUCCESS_TTL
+    } else {
+        FAILURE_TTL
+    };
     if at.elapsed() < ttl {
         Some(entry.clone())
     } else {
@@ -148,17 +186,15 @@ pub fn clear_cache() {
     }
 }
 
-fn join_location(country: &str, city: &str) -> String {
-    let country = country.trim();
-    let city = city.trim();
-    let mut parts = Vec::new();
-    if !country.is_empty() {
-        parts.push(country.to_string());
+fn join_location_parts(parts: &[&str]) -> String {
+    let mut output: Vec<&str> = Vec::new();
+    for part in parts {
+        let part = part.trim();
+        if !part.is_empty() && !output.contains(&part) {
+            output.push(part);
+        }
     }
-    if !city.is_empty() && city != country {
-        parts.push(city.to_string());
-    }
-    parts.join(" ")
+    output.join(" ")
 }
 
 async fn lookup_ip9(ip: &str) -> Option<GeoInfo> {
@@ -197,17 +233,17 @@ async fn lookup_ip9(ip: &str) -> Option<GeoInfo> {
         .unwrap_or("")
         .trim()
         .to_uppercase();
-    // 位置文本：国家 + 城市（无城市时用省份）。
-    let city = data
-        .city
+    // 位置文本：国家 + 省份 + 城市；没有城市时保留省份。
+    let province = data.prov.as_deref().unwrap_or("");
+    let city = data.city.as_deref().unwrap_or("");
+    let district = data
+        .area
         .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or_else(|| data.prov.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+        .or(data.district.as_deref())
         .unwrap_or("");
     Some(GeoInfo {
         country_code,
-        location: join_location(country, city),
+        location: join_location_parts(&[country, province, city, district]),
     })
     .filter(|info| !info.country_code.is_empty() || !info.location.is_empty())
 }
@@ -232,10 +268,11 @@ async fn lookup_geojs(ip: &str) -> Option<GeoInfo> {
     match resp.json::<GeoJsResponse>().await {
         Ok(geo) => Some(GeoInfo {
             country_code: geo.country_code.unwrap_or_default().trim().to_uppercase(),
-            location: join_location(
+            location: join_location_parts(&[
                 geo.country.as_deref().unwrap_or(""),
+                geo.region.as_deref().unwrap_or(""),
                 geo.city.as_deref().unwrap_or(""),
-            ),
+            ]),
         })
         .filter(|info| !info.country_code.is_empty() || !info.location.is_empty()),
         Err(e) => {
@@ -265,10 +302,12 @@ async fn lookup_ip_api(ip: &str) -> Option<GeoInfo> {
     match resp.json::<IpApiResponse>().await {
         Ok(geo) => Some(GeoInfo {
             country_code: geo.country_code.unwrap_or_default().trim().to_uppercase(),
-            location: join_location(
+            location: join_location_parts(&[
                 geo.country.as_deref().unwrap_or(""),
+                geo.region_name.as_deref().unwrap_or(""),
                 geo.city.as_deref().unwrap_or(""),
-            ),
+                geo.district.as_deref().unwrap_or(""),
+            ]),
         })
         .filter(|info| !info.country_code.is_empty() || !info.location.is_empty()),
         Err(e) => {
@@ -287,7 +326,11 @@ fn lookup_mmdb(ip: &str) -> Option<GeoInfo> {
     let record: maxminddb::geoip2::City = reader.lookup(ip.parse().ok()?).ok()?;
     let pick = |names: Option<BTreeMap<&str, &str>>| {
         names
-            .and_then(|n| n.get("zh-CN").or_else(|| n.get("en")).map(|s| s.to_string()))
+            .and_then(|n| {
+                n.get("zh-CN")
+                    .or_else(|| n.get("en"))
+                    .map(|s| s.to_string())
+            })
             .unwrap_or_default()
     };
     let country = record.country.as_ref();
@@ -296,10 +339,31 @@ fn lookup_mmdb(ip: &str) -> Option<GeoInfo> {
         .map(|s| s.trim().to_uppercase())
         .unwrap_or_default();
     let country_name = pick(country.map(|c| c.names.clone()).unwrap_or_default());
-    let city = pick(record.city.as_ref().map(|c| c.names.clone()).unwrap_or_default());
+    let subdivisions: Vec<String> = record
+        .subdivisions
+        .as_ref()
+        .map(|items| {
+            items
+                .iter()
+                .take(2)
+                .map(|subdivision| pick(subdivision.names.clone()))
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let city = pick(
+        record
+            .city
+            .as_ref()
+            .map(|c| c.names.clone())
+            .unwrap_or_default(),
+    );
+    let mut parts: Vec<&str> = vec![&country_name];
+    parts.extend(subdivisions.iter().map(String::as_str));
+    parts.push(&city);
     Some(GeoInfo {
         country_code,
-        location: join_location(&country_name, &city),
+        location: join_location_parts(&parts),
     })
     .filter(|info| !info.country_code.is_empty() || !info.location.is_empty())
 }
@@ -309,4 +373,33 @@ fn urlencode(ip: &str) -> String {
     ip.chars()
         .filter(|c| c.is_ascii_hexdigit() || *c == '.' || *c == ':')
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_private_ip;
+
+    #[test]
+    fn reserved_and_public_ranges() {
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "2001:db8::1",
+        ] {
+            assert!(is_private_ip(ip), "{ip} should be reserved");
+        }
+        for ip in ["8.8.8.8", "1.1.1.1", "172.200.1.1", "2001:4860:4860::8888"] {
+            assert!(!is_private_ip(ip), "{ip} should be public");
+        }
+    }
 }

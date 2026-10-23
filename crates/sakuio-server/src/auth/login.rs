@@ -1,6 +1,6 @@
 use axum::{
     extract::{ConnectInfo, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -35,6 +35,14 @@ pub async fn login(
     jar: CookieJar,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
+    let audit_ip = crate::audit::client_ip(&headers, Some(addr));
+    let audit_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .chars()
+        .take(512)
+        .collect::<String>();
     if *state.install_gate.read().await {
         return api_error(StatusCode::FORBIDDEN, "installation required");
     }
@@ -42,25 +50,78 @@ pub async fn login(
     let Some((user_id, hash, totp_enabled, totp_secret)) =
         repo.find_by_username(&body.username).await.ok().flatten()
     else {
+        crate::audit::record_auth_event(
+            &state,
+            &body.username,
+            "",
+            "LOGIN_FAILED",
+            &body.username,
+            "unknown user",
+            &audit_ip,
+            &audit_agent,
+            401,
+            "POST",
+            "/api/login",
+        )
+        .await;
         return api_error(StatusCode::UNAUTHORIZED, "Invalid credentials");
     };
     if !AdminAuthRepository::verify_password(&body.password, &hash) {
+        crate::audit::record_auth_event(
+            &state,
+            &body.username,
+            &user_id,
+            "LOGIN_FAILED",
+            &body.username,
+            "invalid password",
+            &audit_ip,
+            &audit_agent,
+            401,
+            "POST",
+            "/api/login",
+        )
+        .await;
         return api_error(StatusCode::UNAUTHORIZED, "Invalid credentials");
     }
     if login_requires_2fa(totp_enabled, &totp_secret) {
         let code = body.two_fa_code.as_deref();
         let secret = totp_secret.as_deref().unwrap_or("");
         if code.is_none() || code == Some("") {
+            crate::audit::record_auth_event(
+                &state,
+                &body.username,
+                &user_id,
+                "LOGIN_CHALLENGE",
+                &body.username,
+                "2FA code required",
+                &audit_ip,
+                &audit_agent,
+                401,
+                "POST",
+                "/api/login",
+            )
+            .await;
             return login_needs_2fa_error();
         }
         if !AdminAuthRepository::verify_totp(secret, code.unwrap()) {
+            crate::audit::record_auth_event(
+                &state,
+                &body.username,
+                &user_id,
+                "LOGIN_FAILED",
+                &body.username,
+                "invalid 2FA code",
+                &audit_ip,
+                &audit_agent,
+                401,
+                "POST",
+                "/api/login",
+            )
+            .await;
             return api_error(StatusCode::UNAUTHORIZED, "Invalid 2FA code");
         }
     }
-    let token = match repo
-        .create_session(&user_id, None, None)
-        .await
-    {
+    let token = match repo.create_session(&user_id, None, None).await {
         Ok(t) => t,
         Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "session failed"),
     };
@@ -80,22 +141,23 @@ pub async fn login(
             username: body.username.clone(),
             totp_enabled: login_requires_2fa(totp_enabled, &totp_secret),
         });
+    crate::audit::record_auth_event(
+        &state,
+        &user.username,
+        &user.id,
+        "LOGIN",
+        &body.username,
+        "login success",
+        &audit_ip,
+        &audit_agent,
+        200,
+        "POST",
+        "/api/login",
+    )
+    .await;
     let state_for_notify = state.clone();
     let username = body.username.clone();
-    let login_ip = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| addr.ip().to_string());
+    let login_ip = audit_ip.clone();
     tokio::spawn(async move {
         let provider = crate::site_settings::load(&state_for_notify)
             .await
@@ -119,11 +181,41 @@ pub async fn login(
     (jar.add(cookie), api_success(user_me_json(&user))).into_response()
 }
 
-pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
+pub async fn logout(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let ip = crate::audit::client_ip(&headers, Some(addr));
+    let agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .chars()
+        .take(512)
+        .collect::<String>();
+    let user = crate::auth::RequireAdmin::require(&state, &jar).await.ok();
     if let Some(c) = jar.get(SESSION_COOKIE) {
         let _ = AdminAuthRepository::new(&state.db)
             .delete_session(c.value())
             .await;
+    }
+    if let Some(user) = user {
+        crate::audit::record_auth_event(
+            &state,
+            &user.username,
+            &user.id,
+            "LOGOUT",
+            &user.username,
+            "logout",
+            &ip,
+            &agent,
+            200,
+            "GET",
+            "/api/logout",
+        )
+        .await;
     }
     let cleared = Cookie::build((SESSION_COOKIE, ""))
         .path("/")
@@ -133,10 +225,7 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> impl IntoR
     (jar.add(cleared), api_success(json!({ "logged_out": true }))).into_response()
 }
 
-pub async fn session_me(
-    State(state): State<AppState>,
-    jar: CookieJar,
-) -> impl IntoResponse {
+pub async fn session_me(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
     let repo = AdminAuthRepository::new(&state.db);
     let Some(token) = jar.get(SESSION_COOKIE).map(|c| c.value()) else {
         return api_success(sakuio_db::guest_me_json());

@@ -2,13 +2,10 @@ use crate::state::{
     BoardStateStore, CommandCursor, CommandEnvelope, Presence, RuntimeSnapshot, StateError,
     RECENT_TELEMETRY_MS,
 };
-use sakuio_protocol::TelemetrySample;
 use async_trait::async_trait;
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::Duration,
-};
+use sakuio_protocol::TelemetrySample;
+use serde::Serialize;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
 #[derive(Default)]
@@ -161,5 +158,46 @@ impl BoardStateStore for MemoryBoardStore {
             .filter(|s| s.observed_at_ms >= since_ms)
             .cloned()
             .collect())
+    }
+}
+
+/// Approximate in-process board cache footprint, used by the profiling page.
+/// 板级内存缓存占用估算，供性能分析页面使用。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BoardMemoryStats {
+    pub nodes: u64,
+    pub online: u64,
+    pub snapshots: u64,
+    pub recent_samples: u64,
+    pub commands: u64,
+    pub estimated_bytes: u64,
+}
+
+impl MemoryBoardStore {
+    pub async fn memory_stats(&self) -> BoardMemoryStats {
+        let guard = self.inner.read().await;
+        let mut stats = BoardMemoryStats {
+            nodes: guard.len() as u64,
+            ..Default::default()
+        };
+        for state in guard.values() {
+            if state.presence.is_some() {
+                stats.online += 1;
+            }
+            if let Some(snapshot) = &state.snapshot {
+                stats.snapshots += 1;
+                stats.estimated_bytes += serde_json::to_vec(snapshot)
+                    .map(|bytes| bytes.len() as u64)
+                    .unwrap_or(256);
+            }
+            stats.recent_samples += state.recent.len() as u64;
+            stats.estimated_bytes += (state.recent.len() as u64).saturating_mul(512);
+            for command in &state.commands {
+                stats.commands += 1;
+                stats.estimated_bytes += command.payload.to_string().len() as u64;
+            }
+            stats.estimated_bytes += 128;
+        }
+        stats
     }
 }

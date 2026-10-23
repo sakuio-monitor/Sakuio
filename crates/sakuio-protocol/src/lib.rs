@@ -8,9 +8,9 @@ mod sktl;
 mod telemetry;
 
 pub use control::{
-    AgentVersionRange, BasicInfoParams, ControlMessage, ControlOp, HelloParams,
+    AgentVersionRange, BasicInfoParams, ConfigParams, ControlMessage, ControlOp, HelloParams,
     SyncCommandItem, SyncReqParams, SyncRespParams, TelemetryAckParams, WelcomeParams,
-    AGENT_VERSION_RANGE_MAX, AGENT_VERSION_RANGE_MIN,
+    AGENT_VERSION_RANGE_MAX, AGENT_VERSION_RANGE_MIN, DEFAULT_TELEMETRY_INTERVAL_MS,
 };
 pub use sktl::{decode_sktl, encode_sktl, SkltPayload, SKTL_MAGIC};
 pub use ping::{

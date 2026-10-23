@@ -1,11 +1,15 @@
 use crate::AppState;
 use axum::{
-    extract::State,
-    http::StatusCode,
+    extract::{ConnectInfo, State},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
-use sakuio_db::{test_config_database, CompleteInstallRequest, InstallService, TestDbRequest};
+use sakuio_db::{
+    complete_install, test_config_database, AppDatabase, CompleteInstallRequest, InstallService,
+    TestDbRequest,
+};
+use std::net::SocketAddr;
 
 /// GET `/api/install/status`.
 /// GET `/api/install/status`。
@@ -57,6 +61,8 @@ pub async fn install_test_db(
 /// POST `/api/install/complete`。
 pub async fn install_complete(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<CompleteInstallRequest>,
 ) -> Response {
     {
@@ -69,13 +75,113 @@ pub async fn install_complete(
                 .into_response();
         }
     }
-    let service = InstallService::new(&state.db);
-    match service.complete(body).await {
-        Ok(()) => {
+    let dsn = body
+        .app_db_dsn
+        .clone()
+        .filter(|dsn| !dsn.trim().is_empty())
+        .unwrap_or_else(|| "./data/sakuio.db".into());
+    let site_name = body.sitename.clone();
+    let site_description = body.description.clone();
+    let audit_username = body.username.clone();
+    let audit_driver = body
+        .app_db_driver
+        .clone()
+        .unwrap_or_else(|| "sqlite".into());
+    let audit_ip = crate::audit::client_ip(&headers, Some(addr));
+    let audit_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .chars()
+        .take(512)
+        .collect::<String>();
+
+    // Install directly into the selected database; the bootstrap SQLite only
+    // keeps the locator used at startup.
+    // 直接写入所选数据库；bootstrap SQLite 只保留启动所需的定位信息。
+    let target = match AppDatabase::connect(&dsn, true).await {
+        Ok(db) => db,
+        Err(e) => {
+            tracing::warn!(error = %e, "install target database unavailable");
+            crate::audit::record_auth_event_to(
+                &state.geo,
+                &state.db,
+                &audit_username,
+                "",
+                "INSTALL_FAILED",
+                &audit_username,
+                "target database unavailable",
+                &audit_ip,
+                &audit_agent,
+                400,
+                "POST",
+                "/api/install/complete",
+            )
+            .await;
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "message": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    match complete_install(target.pool(), &state.db, body).await {
+        Ok(outcome) => {
+            // Persist the site name/description into the selected database so
+            // theme HTML injection and settings survive the install restart.
+            // 把站点名称/描述写入所选数据库，保证主题注入与重启后设置一致。
+            let mut settings = crate::site_settings::load_from_pool(target.pool()).await;
+            if let Some(name) = site_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                settings.site_name = name.to_string();
+            }
+            if let Some(description) = site_description {
+                settings.site_description = description;
+            }
+            if let Err(e) = crate::site_settings::save_to_pool(target.pool(), &settings).await {
+                tracing::warn!(error = %e, "save initial site settings failed");
+            }
+            crate::audit::record_auth_event_to(
+                &state.geo,
+                target.pool(),
+                &audit_username,
+                "",
+                "INSTALL",
+                &audit_username,
+                &format!(
+                    "installation completed; driver={audit_driver}; restart_required={}",
+                    outcome.restart_required
+                ),
+                &audit_ip,
+                &audit_agent,
+                200,
+                "POST",
+                "/api/install/complete",
+            )
+            .await;
             let mut gate = state.install_gate.write().await;
             *gate = false;
             tracing::info!("install wizard deactivated");
-            StatusCode::NO_CONTENT.into_response()
+            drop(gate);
+            if outcome.restart_required {
+                // Reply first, then re-exec so the new database takes effect.
+                // 先返回响应，再重启进程使新数据库生效。
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                    if !crate::db_task::spawn_restart() {
+                        tracing::error!(
+                            "install saved to the selected database, but auto-restart failed; \
+                             restart manually"
+                        );
+                    }
+                });
+                Json(serde_json::json!({ "ok": true, "restart": true })).into_response()
+            } else {
+                StatusCode::NO_CONTENT.into_response()
+            }
         }
         Err(e) => {
             tracing::warn!(error = %e, "install complete rejected");

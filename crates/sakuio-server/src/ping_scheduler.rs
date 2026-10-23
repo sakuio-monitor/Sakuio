@@ -1,15 +1,15 @@
 use sakuio_board::BoardStateStore;
 use sakuio_core::AgentCommandBus;
+use sakuio_db::DbPool;
 use sakuio_db::{PingRepository, PingTaskRow};
 use sakuio_protocol::{AgentPingParams, ControlMessage, ControlOp, METHOD_AGENT_PING};
-use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration, MissedTickBehavior};
 
 pub struct PingScheduler {
-    pool: SqlitePool,
+    pool: DbPool,
     board: Arc<dyn BoardStateStore>,
     bus: AgentCommandBus,
     handle: Arc<RwLock<Option<JoinHandle<()>>>>,
@@ -18,7 +18,7 @@ pub struct PingScheduler {
 use tokio::sync::RwLock;
 
 impl PingScheduler {
-    pub fn new(pool: SqlitePool, board: Arc<dyn BoardStateStore>, bus: AgentCommandBus) -> Self {
+    pub fn new(pool: DbPool, board: Arc<dyn BoardStateStore>, bus: AgentCommandBus) -> Self {
         Self {
             pool,
             board,
@@ -45,7 +45,7 @@ impl PingScheduler {
 }
 
 async fn run_ping_loops(
-    pool: SqlitePool,
+    pool: DbPool,
     board: Arc<dyn BoardStateStore>,
     bus: AgentCommandBus,
 ) -> Result<(), String> {
@@ -91,7 +91,7 @@ async fn run_ping_loops(
 }
 
 async fn dispatch_ping(
-    _pool: &SqlitePool,
+    _pool: &DbPool,
     board: &Arc<dyn BoardStateStore>,
     bus: &AgentCommandBus,
     node_uuid: &str,
