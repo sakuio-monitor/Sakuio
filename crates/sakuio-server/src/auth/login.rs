@@ -12,7 +12,7 @@ use crate::web::respond::{api_error, api_success};
 use crate::AppState;
 use sakuio_db::{login_requires_2fa, AdminAuthRepository, LoginRequest};
 
-use super::{user_me_json, SESSION_COOKIE};
+use super::{me_response, session_token, SESSION_COOKIE, SESSION_COOKIE_COMPAT};
 
 const SESSION_MAX_AGE_SECS: i64 = 30 * 24 * 3600;
 
@@ -125,7 +125,13 @@ pub async fn login(
         Ok(t) => t,
         Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "session failed"),
     };
-    let cookie = Cookie::build((SESSION_COOKIE, token))
+    let cookie = Cookie::build((SESSION_COOKIE, token.clone()))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .max_age(cookie::time::Duration::seconds(SESSION_MAX_AGE_SECS))
+        .build();
+    let compat_cookie = Cookie::build((SESSION_COOKIE_COMPAT, token.clone()))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
@@ -178,7 +184,21 @@ pub async fn login(
         )
         .await;
     });
-    (jar.add(cookie), api_success(user_me_json(&user))).into_response()
+    (
+        jar.add(cookie).add(compat_cookie),
+        Json(me_response(
+            serde_json::json!({
+                "username": user.username,
+                "logged_in": true,
+                "2fa_enabled": user.totp_enabled,
+                "uuid": user.id,
+                "sso_type": "",
+                "sso_id": "",
+            }),
+            Some(&token),
+        )),
+    )
+        .into_response()
 }
 
 pub async fn logout(
@@ -196,9 +216,9 @@ pub async fn logout(
         .take(512)
         .collect::<String>();
     let user = crate::auth::RequireAdmin::require(&state, &jar).await.ok();
-    if let Some(c) = jar.get(SESSION_COOKIE) {
+    if let Some(token) = session_token(&jar) {
         let _ = AdminAuthRepository::new(&state.db)
-            .delete_session(c.value())
+            .delete_session(token)
             .await;
     }
     if let Some(user) = user {
@@ -222,17 +242,49 @@ pub async fn logout(
         .max_age(cookie::time::Duration::seconds(0))
         .http_only(true)
         .build();
-    (jar.add(cleared), api_success(json!({ "logged_out": true }))).into_response()
+    let compat_cleared = Cookie::build((SESSION_COOKIE_COMPAT, ""))
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(0))
+        .http_only(true)
+        .build();
+    let jar = jar.add(cleared).add(compat_cleared);
+    let wants_html = headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("text/html"));
+    if wants_html {
+        (jar, axum::response::Redirect::to("/")).into_response()
+    } else {
+        (jar, api_success(json!({ "logged_out": true }))).into_response()
+    }
 }
 
-pub async fn session_me(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
+pub async fn session_me(State(state): State<AppState>, jar: CookieJar) -> axum::response::Response {
     let repo = AdminAuthRepository::new(&state.db);
-    let Some(token) = jar.get(SESSION_COOKIE).map(|c| c.value()) else {
-        return api_success(sakuio_db::guest_me_json());
+    let response = if let Some(token) = session_token(&jar) {
+        match repo.resolve_session(token).await {
+            Ok(Some(user)) => Json(me_response(
+                serde_json::json!({
+                    "username": user.username,
+                    "logged_in": true,
+                    "2fa_enabled": user.totp_enabled,
+                    "uuid": user.id,
+                    "sso_type": "",
+                    "sso_id": "",
+                }),
+                Some(token),
+            ))
+            .into_response(),
+            Ok(None) => Json(me_response(sakuio_db::guest_me_json(), None)).into_response(),
+            Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db error").into_response(),
+        }
+    } else {
+        Json(me_response(sakuio_db::guest_me_json(), None)).into_response()
     };
-    match repo.resolve_session(token).await {
-        Ok(Some(user)) => api_success(user_me_json(&user)),
-        Ok(None) => api_success(sakuio_db::guest_me_json()),
-        Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db error"),
-    }
+    let mut response = response;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
 }

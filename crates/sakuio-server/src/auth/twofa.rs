@@ -7,6 +7,7 @@ use crate::web::respond::{api_error, api_success};
 use crate::AppState;
 use axum_extra::extract::CookieJar;
 use sakuio_db::{generate_totp_secret, totp_provisioning_uri, AdminAuthRepository};
+use qrcodegen::{QrCode, QrCodeEcc};
 
 #[derive(Deserialize)]
 pub struct TwoFaCodeBody {
@@ -16,6 +17,7 @@ pub struct TwoFaCodeBody {
 
 #[derive(Deserialize)]
 pub struct Disable2faBody {
+    #[serde(default)]
     pub password: String,
     #[serde(default, rename = "2fa_code")]
     pub two_fa_code: String,
@@ -44,7 +46,25 @@ pub async fn setup_2fa(
     api_success(json!({
         "secret": secret,
         "otpauth_url": uri,
+        "qr_svg": render_qr_svg(&uri),
     }))
+}
+
+fn render_qr_svg(data: &str) -> Option<String> {
+    let qr = QrCode::encode_text(data, QrCodeEcc::Medium).ok()?;
+    let border = 4;
+    let size = qr.size() + border * 2;
+    let mut path = String::new();
+    for y in 0..qr.size() {
+        for x in 0..qr.size() {
+            if qr.get_module(x, y) {
+                path.push_str(&format!("M{} {}h1v1h-1z", x + border, y + border));
+            }
+        }
+    }
+    Some(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {size} {size}\" shape-rendering=\"crispEdges\"><rect width=\"{size}\" height=\"{size}\" fill=\"#fff\"/><path d=\"{path}\" fill=\"#000\"/></svg>"
+    ))
 }
 
 pub async fn enable_2fa(
@@ -88,7 +108,7 @@ pub async fn disable_2fa(
     else {
         return api_error(StatusCode::UNAUTHORIZED, "Unauthorized");
     };
-    if !AdminAuthRepository::verify_password(&body.password, &hash) {
+    if !body.password.is_empty() && !AdminAuthRepository::verify_password(&body.password, &hash) {
         return api_error(StatusCode::UNAUTHORIZED, "Invalid password");
     }
     if user.totp_enabled {

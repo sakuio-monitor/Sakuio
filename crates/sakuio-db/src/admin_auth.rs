@@ -1,6 +1,6 @@
 use crate::DbPool;
 use crate::{DbError, DbResult};
-use argon2::password_hash::{PasswordHash, PasswordVerifier};
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -88,6 +88,43 @@ impl<'a> AdminAuthRepository<'a> {
             Err(_) => return false,
         };
         totp.check_current(code.trim()).unwrap_or(false)
+    }
+
+    pub fn hash_password(password: &str) -> DbResult<String> {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map(|hash| hash.to_string())
+            .map_err(|e| DbError::Message(e.to_string()))
+    }
+
+    pub async fn update_username(&self, user_id: &str, username: &str) -> DbResult<()> {
+        sqlx::query("UPDATE admin_users SET username = ? WHERE id = ?")
+            .bind(username)
+            .bind(user_id)
+            .execute(self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_password_hash(&self, user_id: &str, password_hash: &str) -> DbResult<()> {
+        sqlx::query("UPDATE admin_users SET password_hash = ? WHERE id = ?")
+            .bind(password_hash)
+            .bind(user_id)
+            .execute(self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn username_exists(&self, username: &str, except_user_id: &str) -> DbResult<bool> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM admin_users WHERE username = ? AND id <> ? LIMIT 1",
+        )
+        .bind(username)
+        .bind(except_user_id)
+        .fetch_optional(self.pool)
+        .await?;
+        Ok(row.is_some())
     }
 
     pub async fn create_session(

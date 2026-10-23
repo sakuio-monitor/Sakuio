@@ -10,7 +10,7 @@ use axum_extra::extract::CookieJar;
 use crate::AppState;
 use sakuio_db::AdminAuthRepository;
 
-use super::SESSION_COOKIE;
+use super::{SESSION_COOKIE, SESSION_COOKIE_COMPAT};
 
 #[derive(Clone, Debug)]
 pub struct AdminUser {
@@ -41,22 +41,21 @@ impl RequireAdmin {
     }
 
     pub async fn require(state: &AppState, jar: &CookieJar) -> Result<AdminUser, StatusCode> {
-        let token = jar
-            .get(SESSION_COOKIE)
-            .map(|c| c.value())
-            .unwrap_or("");
+        let token = super::session_token(jar).unwrap_or("");
         Self::require_token(state, token).await
     }
 }
 
 fn session_token_from_cookie_header(raw: &str) -> Option<String> {
-    let prefix = format!("{SESSION_COOKIE}=");
-    for part in raw.split(';') {
-        let part = part.trim();
-        if let Some(value) = part.strip_prefix(&prefix) {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
+    for name in [SESSION_COOKIE, SESSION_COOKIE_COMPAT] {
+        let prefix = format!("{name}=");
+        for part in raw.split(';') {
+            let part = part.trim();
+            if let Some(value) = part.strip_prefix(&prefix) {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
             }
         }
     }
