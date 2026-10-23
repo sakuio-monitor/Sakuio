@@ -28,23 +28,25 @@ Sakuio-frontend（前端）
 
 1. `build` job 按矩阵交叉编译，产出裸二进制（无压缩包，统一命名风格）：
 
-   | 目标 | 工具链 | 资产名 |
-   |---|---|---|
-   | linux x86_64 | cargo-zigbuild | `sakuio-agent-linux-amd64` |
-   | linux i686 | cargo-zigbuild | `sakuio-agent-linux-386` |
-   | linux aarch64 | cargo-zigbuild | `sakuio-agent-linux-arm64` |
-   | linux armv7 | cargo-zigbuild | `sakuio-agent-linux-arm` |
-   | linux loongarch64 | cargo-zigbuild | `sakuio-agent-linux-loong64` |
-   | linux riscv64 | cargo-zigbuild | `sakuio-agent-linux-riscv64` |
-   | darwin aarch64 | 原生 | `sakuio-agent-darwin-arm64` |
-   | darwin x86_64 | 原生 | `sakuio-agent-darwin-amd64` |
-   | windows x86_64 | MSVC | `sakuio-agent-windows-amd64.exe` |
-   | windows i686 | MSVC | `sakuio-agent-windows-386.exe` |
-   | windows aarch64 | MSVC | `sakuio-agent-windows-arm64.exe` |
+   | 目标 | 目标三元组 | 工具链 | 资产名 |
+   |---|---|---|---|
+   | linux x86_64 | `x86_64-unknown-linux-musl` | cargo-zigbuild | `sakuio-agent-linux-amd64` |
+   | linux i686 | `i686-unknown-linux-musl` | cargo-zigbuild | `sakuio-agent-linux-386` |
+   | linux aarch64 | `aarch64-unknown-linux-musl` | cargo-zigbuild | `sakuio-agent-linux-arm64` |
+   | linux armv7 | `armv7-unknown-linux-musleabihf` | cargo-zigbuild | `sakuio-agent-linux-arm` |
+   | linux loongarch64 | `loongarch64-unknown-linux-musl` | cargo-zigbuild | `sakuio-agent-linux-loong64` |
+   | linux riscv64 | `riscv64gc-unknown-linux-musl` | cargo-zigbuild | `sakuio-agent-linux-riscv64` |
+   | darwin aarch64 | `aarch64-apple-darwin` | 原生 | `sakuio-agent-darwin-arm64` |
+   | darwin x86_64 | `x86_64-apple-darwin` | 原生 | `sakuio-agent-darwin-amd64` |
+   | windows x86_64 | `x86_64-pc-windows-msvc` | MSVC | `sakuio-agent-windows-amd64.exe` |
+   | windows i686 | `i686-pc-windows-msvc` | MSVC | `sakuio-agent-windows-386.exe` |
+   | windows aarch64 | `aarch64-pc-windows-msvc` | MSVC | `sakuio-agent-windows-arm64.exe` |
 
    说明：
-   - Linux gnu 系目标全部走 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
-     （zig 交叉编译，无需目标平台系统库）。zig 从官方归档直装
+   - Linux 目标全部使用 **musl 静态链接**，通过
+     [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) 交叉编译，
+     不依赖目标机的 glibc 版本；同一资产可在旧版和新版发行版直接运行。
+     Release 构建会校验产物不是动态链接。zig 从官方归档直装
      `0.15.2`（实测可用；`setup-zig` 镜像不稳、builds 目录只留最新版）。
    - **MIPS 暂不提供**：Rust 上游已移除 mips 预编译 std
      （新版 rustup 对旧通道也拒绝下载），且 zig 不支持 MIPS。后续如需
