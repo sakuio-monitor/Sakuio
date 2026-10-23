@@ -17,12 +17,13 @@ fn record_alloc(size: usize) {
     PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
 }
 
+#[allow(deprecated)]
 fn record_dealloc(size: usize) {
     let size = size as u64;
-    let _ = LIVE_BYTES.try_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+    let _ = LIVE_BYTES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
         Some(live.saturating_sub(size))
     });
-    let _ = LIVE_OBJECTS.try_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+    let _ = LIVE_OBJECTS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
         Some(live.saturating_sub(1))
     });
 }
@@ -51,6 +52,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         record_dealloc(layout.size());
     }
 
+    #[allow(deprecated)]
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let resized = unsafe { System.realloc(pointer, layout, new_size) };
         if !resized.is_null() {
@@ -62,7 +64,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
                 PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
             } else {
                 let delta = (old_size - new_size) as u64;
-                let _ = LIVE_BYTES.try_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+                let _ = LIVE_BYTES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
                     Some(live.saturating_sub(delta))
                 });
             }

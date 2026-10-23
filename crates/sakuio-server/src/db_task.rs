@@ -340,9 +340,20 @@ pub(crate) fn spawn_restart() -> bool {
         }
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        tracing::info!("re-executing server with the new configuration");
+        // `exec` keeps the same PID, so systemd/launchd does not race a second
+        // process against the old listener. It only returns on failure.
+        let error = std::process::Command::new(&exe).args(&args).exec();
+        tracing::error!(error = %error, "re-exec failed; falling back to spawn+exit");
+    }
+
     match std::process::Command::new(exe).args(args).spawn() {
         Ok(_) => {
-            tracing::info!("main database switched, restarting process");
+            tracing::info!("server restart process spawned");
             std::process::exit(0);
         }
         Err(e) => {

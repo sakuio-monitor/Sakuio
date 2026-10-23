@@ -142,13 +142,9 @@ pub async fn install_database(
             .into_response();
     }
     target.shutdown().await;
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        if !crate::db_task::spawn_restart() {
-            tracing::error!("database configured, but auto-restart failed; restart manually");
-        }
-    });
-    Json(serde_json::json!({ "ok": true, "restart": true })).into_response()
+    // Persist the database choice now, but keep this process alive through the
+    // site/admin steps. The single restart happens after full completion.
+    Json(serde_json::json!({ "ok": true, "restart": false })).into_response()
 }
 
 /// POST `/api/install/complete`.
@@ -169,16 +165,35 @@ pub async fn install_complete(
                 .into_response();
         }
     }
-    let configured = crate::config::ServerConfig::load_or_create()
-        .ok()
-        .is_some_and(|config| config.database.is_configured() && config.database.dsn() == state.db.dsn());
-    if !configured {
+    let config = match crate::config::ServerConfig::load_or_create() {
+        Ok(config) => config,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "message": format!("load config.yaml failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    if !config.database.is_configured() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "message": "configure the database first" })),
         )
             .into_response();
     }
+    // Connect the database chosen in step 2 and write the account/site data
+    // there. The process stays alive until all setup steps are complete.
+    let target = match AppDatabase::connect(&config.database.dsn(), true).await {
+        Ok(target) => target,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "message": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
     let site_name = body.sitename.clone();
     let site_description = body.description.clone();
     let audit_username = body.username.clone();
@@ -195,15 +210,12 @@ pub async fn install_complete(
         .take(512)
         .collect::<String>();
 
-    // The database was configured and the process restarted in the previous
-    // step; write the remaining site/admin data directly into the live DB.
-    let target = &state.db;
-    match complete_install(target, target, body).await {
+    match complete_install(target.pool(), &state.db, body).await {
         Ok(outcome) => {
             // Persist the site name/description into the selected database so
             // theme HTML injection and settings survive the install restart.
             // 把站点名称/描述写入所选数据库，保证主题注入与重启后设置一致。
-            let mut settings = crate::site_settings::load_from_pool(target).await;
+            let mut settings = crate::site_settings::load_from_pool(target.pool()).await;
             if let Some(name) = site_name
                 .as_deref()
                 .map(str::trim)
@@ -214,7 +226,7 @@ pub async fn install_complete(
             if let Some(description) = site_description {
                 settings.site_description = description;
             }
-            if let Err(e) = crate::site_settings::save_to_pool(target, &settings).await {
+            if let Err(e) = crate::site_settings::save_to_pool(target.pool(), &settings).await {
                 tracing::warn!(error = %e, "save initial site settings failed");
             }
             // New installations use the Sakuio theme by default when the
@@ -224,7 +236,7 @@ pub async fn install_complete(
             }
             crate::audit::record_auth_event_to(
                 &state.geo,
-                target,
+                target.pool(),
                 &audit_username,
                 "",
                 "INSTALL",
@@ -244,7 +256,7 @@ pub async fn install_complete(
             *gate = false;
             tracing::info!("install wizard deactivated");
             drop(gate);
-            if outcome.restart_required {
+            if outcome.restart_required || target.dsn() != state.db.dsn() {
                 // Reply first, then re-exec so the new database takes effect.
                 // 先返回响应，再重启进程使新数据库生效。
                 tokio::spawn(async move {
