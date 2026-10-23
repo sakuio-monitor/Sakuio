@@ -345,7 +345,7 @@ async fn fs_download(
 ) -> Result<Response, (StatusCode, String)> {
     let token = node_token(&state, &uuid).await?;
     let relay_id = Uuid::new_v4().to_string();
-    state.relay.register(relay_id.clone()).await;
+    state.relay.register(relay_id.clone(), &uuid).await;
     let relay = build_relay_spec(&relay_id, &token);
     let rx = state.relay.open_client_download(&relay_id).await;
     state
@@ -395,7 +395,7 @@ async fn fs_upload(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let token = node_token(&state, &uuid).await?;
     let relay_id = Uuid::new_v4().to_string();
-    state.relay.register(relay_id.clone()).await;
+    state.relay.register(relay_id.clone(), &uuid).await;
     let feed_tx = state.relay.bind_upload_feed(&relay_id).await;
     let relay = build_relay_spec(&relay_id, &token);
     state

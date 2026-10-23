@@ -52,6 +52,7 @@ fn browser_to_agent(msg: Message) -> Option<AgentInbound> {
 }
 
 struct Slot {
+    owner: Option<String>,
     to_agent: Option<mpsc::Sender<AgentInbound>>,
     to_client: Option<mpsc::Sender<Vec<u8>>>,
     pending_upload_rx: Option<mpsc::Receiver<Vec<u8>>>,
@@ -61,8 +62,9 @@ struct Slot {
 }
 
 impl Slot {
-    fn new() -> Self {
+    fn new(owner: Option<String>) -> Self {
         Self {
+            owner,
             to_agent: None,
             to_client: None,
             pending_upload_rx: None,
@@ -119,16 +121,16 @@ impl RelayBroker {
         stats
     }
 
-    pub async fn register(&self, relay_id: String) {
+    pub async fn register(&self, relay_id: String, node_uuid: &str) {
         let mut guard = self.inner.write().await;
         guard.retain(|_, slot| !slot.stale());
-        guard.insert(relay_id, Slot::new());
+        guard.insert(relay_id, Slot::new(Some(node_uuid.to_string())));
     }
 
     pub async fn open_client_download(&self, relay_id: &str) -> mpsc::Receiver<Vec<u8>> {
         let (tx, rx) = mpsc::channel::<Vec<u8>>(CHANNEL_CAP);
         let mut guard = self.inner.write().await;
-        let slot = guard.entry(relay_id.to_string()).or_insert_with(Slot::new);
+        let slot = guard.entry(relay_id.to_string()).or_insert_with(|| Slot::new(None));
         slot.to_client = Some(tx);
         rx
     }
@@ -136,13 +138,24 @@ impl RelayBroker {
     pub async fn bind_upload_feed(&self, relay_id: &str) -> mpsc::Sender<Vec<u8>> {
         let (tx, rx) = mpsc::channel::<Vec<u8>>(CHANNEL_CAP);
         let mut guard = self.inner.write().await;
-        let slot = guard.entry(relay_id.to_string()).or_insert_with(Slot::new);
+        let slot = guard.entry(relay_id.to_string()).or_insert_with(|| Slot::new(None));
         slot.pending_upload_rx = Some(rx);
         tx
     }
 
-    pub async fn attach_agent(&self, relay_id: &str, socket: WebSocket) {
+    pub async fn attach_agent_for(&self, relay_id: &str, node_uuid: &str, socket: WebSocket) -> bool {
+        let owner = {
+            let guard = self.inner.read().await;
+            guard
+                .get(relay_id)
+                .and_then(|slot| slot.owner.as_deref())
+                .map(str::to_string)
+        };
+        if owner.as_deref() != Some(node_uuid) {
+            return false;
+        }
         self.attach_side(relay_id, socket, true).await;
+        true
     }
 
     pub async fn attach_client(&self, relay_id: &str, socket: WebSocket) {
@@ -163,7 +176,7 @@ impl RelayBroker {
 
         let mut pending_upload_rx = {
             let mut guard = self.inner.write().await;
-            let slot = guard.entry(relay_id.to_string()).or_insert_with(Slot::new);
+            let slot = guard.entry(relay_id.to_string()).or_insert_with(|| Slot::new(None));
             slot.to_agent = Some(to_agent_tx.clone());
             let pending = std::mem::take(&mut slot.pending_to_agent);
             let upload = slot.pending_upload_rx.take();
@@ -250,7 +263,7 @@ impl RelayBroker {
 
         let pending_out = {
             let mut guard = self.inner.write().await;
-            let slot = guard.entry(relay_id.to_string()).or_insert_with(Slot::new);
+            let slot = guard.entry(relay_id.to_string()).or_insert_with(|| Slot::new(None));
             slot.to_client = Some(to_client_tx.clone());
             std::mem::take(&mut slot.pending_to_client)
         };

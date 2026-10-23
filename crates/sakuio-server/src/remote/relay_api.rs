@@ -20,15 +20,16 @@ pub async fn agent_relay_ws(
     let db = state.db.clone();
     let relay = state.relay.clone();
     ws.on_upgrade(move |socket| async move {
-        if ClientRepository::new(&db)
+        let Some(node_uuid) = ClientRepository::new(&db)
             .uuid_by_token(q.token.trim())
             .await
             .ok()
             .flatten()
-            .is_none()
-        {
+        else {
             return;
-        }
-        relay.attach_agent(&relay_id, socket).await;
+        };
+        // A valid token alone is not enough: the relay must have been created
+        // for this exact node, otherwise another agent could hijack a session.
+        let _ = relay.attach_agent_for(&relay_id, &node_uuid, socket).await;
     })
 }

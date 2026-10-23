@@ -94,7 +94,7 @@ async fn shell_session(
             .unwrap_or_default(),
     };
     let relay_id = Uuid::new_v4().to_string();
-    state.relay.register(relay_id.clone()).await;
+    state.relay.register(relay_id.clone(), &uuid).await;
 
     let token = match ClientRepository::new(&state.db).token_by_uuid(&uuid).await {
         Ok(Some(t)) => t,

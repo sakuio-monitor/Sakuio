@@ -85,7 +85,7 @@ pub async fn exec_task(
         };
 
         let relay_id = Uuid::new_v4().to_string();
-        state.relay.register(relay_id.clone()).await;
+        state.relay.register(relay_id.clone(), &uuid).await;
         state
             .exec_streams
             .put(&task_id, uuid, relay_id.clone())
