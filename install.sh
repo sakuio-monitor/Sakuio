@@ -73,6 +73,21 @@ if [[ "$INTERACTIVE" -eq 1 ]]; then
   [[ -n "$proxy_input" ]] && GITHUB_PROXY="$proxy_input"
 fi
 
+# Accept accelerators such as https://ghfast.top and expand them to the
+# GitHub-prefix form the proxy expects. A full prefix is used as-is.
+github_base() {
+  local proxy="${1%/}"
+  if [[ -z "$proxy" || "$proxy" == "https://github.com" ]]; then
+    printf '%s' "https://github.com"
+  elif [[ "$proxy" == *"/https://github.com" || "$proxy" == *"/http://github.com" ]]; then
+    printf '%s' "$proxy"
+  else
+    printf '%s' "$proxy/https://github.com"
+  fi
+}
+
+GITHUB_BASE="$(github_base "$GITHUB_PROXY")"
+
 is_darwin=0
 [[ "$(uname -s)" == "Darwin" ]] && is_darwin=1
 
@@ -118,7 +133,7 @@ esac
 
 # ---- resolve version --------------------------------------------------------
 if [[ -z "$VERSION" ]]; then
-  LATEST_URL="${GITHUB_PROXY:-https://github.com}/${REPO}/releases/latest"
+  LATEST_URL="${GITHUB_BASE}/${REPO}/releases/latest"
   if command -v curl >/dev/null 2>&1; then
     VERSION="$(curl -fsSL -o /dev/null -w '%{url_effective}' "$LATEST_URL" | sed 's|.*/tag/v||' | sed 's|/$||')"
   else
@@ -131,7 +146,7 @@ if [[ -z "$VERSION" ]]; then
 fi
 
 ASSET="sakuio-server-${OS}-${ARCH}"
-BASE="${GITHUB_PROXY:-https://github.com}/${REPO}/releases/download/v${VERSION}"
+BASE="${GITHUB_BASE}/${REPO}/releases/download/v${VERSION}"
 DOWNLOAD_URL="${BASE}/${ASSET}"
 
 echo "==> installing Sakuio server v${VERSION} (${OS}/${ARCH})"
@@ -264,6 +279,16 @@ INSTALL_DIR="$INSTALL_DIR"
 SERVICE_NAME="$SERVICE_NAME"
 BIN="\$INSTALL_DIR/sakuio-server"
 cd "\$INSTALL_DIR" || exit 1
+github_base() {
+  local proxy="\${1%/}"
+  if [[ -z "\$proxy" || "\$proxy" == "https://github.com" ]]; then
+    printf '%s' "https://github.com"
+  elif [[ "\$proxy" == *"/https://github.com" || "\$proxy" == *"/http://github.com" ]]; then
+    printf '%s' "\$proxy"
+  else
+    printf '%s' "\$proxy/https://github.com"
+  fi
+}
 IS_DARWIN=0
 [[ "\$(uname -s)" == "Darwin" ]] && IS_DARWIN=1
 
@@ -310,7 +335,9 @@ svc_logs100() {
 }
 
 latest_version() {
-  local latest_url="\${GITHUB_PROXY:-https://github.com}/sakuio-monitor/Sakuio/releases/latest"
+  local base
+  base="\$(github_base "\${GITHUB_PROXY:-}")"
+  local latest_url="\${base}/sakuio-monitor/Sakuio/releases/latest"
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL -o /dev/null -w '%{url_effective}' "\$latest_url" | sed 's|.*/tag/v||' | sed 's|/\$||'
   else
@@ -336,7 +363,9 @@ do_update() {
   case "\$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) echo "不支持的系统" >&2; return 1 ;; esac
   case "\$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) echo "不支持的架构" >&2; return 1 ;; esac
   asset="sakuio-server-\${os}-\${arch}"
-  url="\${proxy:-https://github.com}/sakuio-monitor/Sakuio/releases/download/v\${version}/\${asset}"
+  local base
+  base="\$(github_base "\${proxy:-}")"
+  url="\${base}/sakuio-monitor/Sakuio/releases/download/v\${version}/\${asset}"
   tmp="\$(mktemp)"
   echo "==> 下载 \$url"
   if command -v curl >/dev/null 2>&1; then
