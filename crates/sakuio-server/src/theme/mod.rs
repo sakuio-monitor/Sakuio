@@ -84,6 +84,17 @@ pub struct SiteInject {
     pub custom_body: String,
 }
 
+fn is_github_url(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| {
+            host == "github.com"
+                || host == "raw.githubusercontent.com"
+                || host.ends_with(".githubusercontent.com")
+        })
+}
+
 pub struct ThemeService {
     store: ThemeStore,
     market: market::MarketClient,
@@ -124,6 +135,19 @@ impl ThemeService {
 
     pub fn market_url(&self) -> &str {
         self.market.catalog_url()
+    }
+
+    /// Fetch a catalog from an optional alternate source. The default source
+    /// remains the built-in Komari market; custom sources are validated here.
+    pub async fn market_list_from(
+        &self,
+        source: Option<String>,
+        force: bool,
+    ) -> Result<Vec<MarketTheme>, String> {
+        match source.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()) {
+            Some(url) => market::MarketClient::new(url)?.catalog(force).await,
+            None => self.market.catalog(force).await,
+        }
     }
 
     pub fn jobs(&self) -> &ThemeJobs {
@@ -287,14 +311,37 @@ impl ThemeService {
     pub async fn start_market_install(
         self: &Arc<Self>,
         short: String,
+        source: Option<String>,
+        proxy: Option<String>,
         force_catalog: bool,
     ) -> ThemeJob {
         let job = self.jobs.create_or_reuse(&short, "install").await;
         let service = self.clone();
         let task = job.clone();
         tokio::spawn(async move {
+            let market = match source.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()) {
+                Some(url) => match market::MarketClient::new(url) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        task.fail(error);
+                        return;
+                    }
+                },
+                None => {
+                    // The default market client is owned by the service; use
+                    // the service path when no custom source was supplied.
+                    if let Err(error) = service
+                        .run_market_install(&task, &short, force_catalog, proxy.clone())
+                        .await
+                    {
+                        tracing::warn!(theme = %short, error = %error, "theme market install failed");
+                        task.fail(error);
+                    }
+                    return;
+                }
+            };
             if let Err(error) = service
-                .run_market_install(&task, &short, force_catalog)
+                .run_market_install_with(&task, &short, force_catalog, &market, proxy.clone())
                 .await
             {
                 tracing::warn!(theme = %short, error = %error, "theme market install failed");
@@ -309,13 +356,30 @@ impl ThemeService {
         job: &ThemeJob,
         short: &str,
         force_catalog: bool,
+        proxy: Option<String>,
+    ) -> Result<(), String> {
+        self.run_market_install_with(job, short, force_catalog, &self.market, proxy)
+            .await
+    }
+
+    async fn run_market_install_with(
+        &self,
+        job: &ThemeJob,
+        short: &str,
+        force_catalog: bool,
+        market: &market::MarketClient,
+        proxy: Option<String>,
     ) -> Result<(), String> {
         job.set_phase("resolving");
-        let entry = self
-            .market
+        let mut entry = market
             .find(short, force_catalog)
             .await?
             .ok_or_else(|| format!("theme {short} not found in market"))?;
+        if let Some(proxy) = proxy.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            if is_github_url(&entry.download) {
+                entry.download = format!("{}/{}", proxy.trim_end_matches('/'), entry.download);
+            }
+        }
         if entry.installable == Some(false) {
             return Err(format!("theme {short} is not installable"));
         }
@@ -325,7 +389,7 @@ impl ThemeService {
             .acquire()
             .await
             .map_err(|e| format!("download queue closed: {e}"))?;
-        let bytes = self.download_market(job, &entry).await?;
+        let bytes = self.download_market(job, &entry, market).await?;
         job.set_phase("installing");
         let manifest = self.install_bytes_blocking(bytes).await?;
         self.store.save_source(
@@ -344,12 +408,17 @@ impl ThemeService {
 
     /// Starts an asynchronous update (market version or manifest URL).
     /// 启动异步更新（市场版本或清单 URL）。
-    pub async fn start_update(self: &Arc<Self>, short: String, force_catalog: bool) -> ThemeJob {
+    pub async fn start_update(
+        self: &Arc<Self>,
+        short: String,
+        force_catalog: bool,
+        proxy: Option<String>,
+    ) -> ThemeJob {
         let job = self.jobs.create_or_reuse(&short, "update").await;
         let service = self.clone();
         let task = job.clone();
         tokio::spawn(async move {
-            if let Err(error) = service.run_update(&task, &short, force_catalog).await {
+            if let Err(error) = service.run_update(&task, &short, force_catalog, proxy).await {
                 tracing::warn!(theme = %short, error = %error, "theme update failed");
                 task.fail(error);
             }
@@ -362,16 +431,22 @@ impl ThemeService {
         job: &ThemeJob,
         short: &str,
         force_catalog: bool,
+        proxy: Option<String>,
     ) -> Result<(), String> {
         let theme = self.store.load(short)?;
         let source = self.store.source(short);
         if let Some(market_short) = source.market_short.as_deref() {
             job.set_phase("resolving");
-            let entry = self
+            let mut entry = self
                 .market
                 .find(market_short, force_catalog)
                 .await?
                 .ok_or_else(|| format!("theme {market_short} is no longer in the market"))?;
+            if let Some(proxy) = proxy.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                if is_github_url(&entry.download) {
+                    entry.download = format!("{}/{}", proxy.trim_end_matches('/'), entry.download);
+                }
+            }
             if !entry.version.trim().is_empty()
                 && !version_is_newer(&entry.version, &theme.manifest.version)
             {
@@ -384,7 +459,7 @@ impl ThemeService {
                 .acquire()
                 .await
                 .map_err(|e| format!("download queue closed: {e}"))?;
-            let bytes = self.download_market(job, &entry).await?;
+            let bytes = self.download_market(job, &entry, &self.market).await?;
             job.set_phase("installing");
             let manifest = self.install_bytes_blocking(bytes).await?;
             self.store.save_source(
@@ -418,13 +493,13 @@ impl ThemeService {
         &self,
         job: &ThemeJob,
         entry: &MarketTheme,
+        market: &market::MarketClient,
     ) -> Result<Vec<u8>, String> {
         let mut attempt = 0;
         loop {
             job.set_phase("downloading");
             let progress_target = job.clone();
-            let result = self
-                .market
+            let result = market
                 .download_with_progress(entry, move |progress| {
                     progress_target.set_progress(
                         progress.downloaded,

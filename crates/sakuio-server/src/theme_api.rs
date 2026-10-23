@@ -154,7 +154,8 @@ pub async fn update(
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let force = query.get("refresh").is_some_and(|value| value != "0");
-    let job = state.theme.start_update(short, force).await;
+    let proxy = query.get("proxy").cloned();
+    let job = state.theme.start_update(short, force, proxy).await;
     (
         StatusCode::ACCEPTED,
         Json(json!({ "success": true, "job_id": job.id() })),
@@ -272,7 +273,9 @@ pub async fn install_market(
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let force = query.get("refresh").is_some_and(|value| value != "0");
-    let job = state.theme.start_market_install(short, force).await;
+    let source = query.get("source").cloned();
+    let proxy = query.get("proxy").cloned();
+    let job = state.theme.start_market_install(short, source, proxy, force).await;
     (
         StatusCode::ACCEPTED,
         Json(json!({ "success": true, "job_id": job.id() })),
