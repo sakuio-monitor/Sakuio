@@ -120,9 +120,9 @@ esac
 if [[ -z "$VERSION" ]]; then
   LATEST_URL="${GITHUB_PROXY:-https://github.com}/${REPO}/releases/latest"
   if command -v curl >/dev/null 2>&1; then
-    VERSION="$(curl -fsSL -o /dev/null -w '%{url_effective}' "$LATEST_URL" | sed 's|.*/tag/v||')"
+    VERSION="$(curl -fsSL -o /dev/null -w '%{url_effective}' "$LATEST_URL" | sed 's|.*/tag/v||' | sed 's|/$||')"
   else
-    VERSION="$(wget -qO- --max-redirs=5 "$LATEST_URL" 2>/dev/null | sed 's|.*/tag/v||' || true)"
+    VERSION="$(wget -qO- --max-redirs=5 "$LATEST_URL" 2>/dev/null | sed 's|.*/tag/v||' | sed 's|/$||' || true)"
   fi
   if [[ -z "$VERSION" || "$VERSION" == *"releases/latest"* ]]; then
     echo "error: failed to resolve latest version; pass --version" >&2
@@ -282,7 +282,7 @@ svc_logs100() {
 latest_version() {
   local latest_url="\${GITHUB_PROXY:-https://github.com}/sakuio-monitor/Sakuio/releases/latest"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL -o /dev/null -w '%{url_effective}' "\$latest_url" | sed 's|.*/tag/v||'
+    curl -fsSL -o /dev/null -w '%{url_effective}' "\$latest_url" | sed 's|.*/tag/v||' | sed 's|/\$||'
   else
     wget -qO- --max-redirs=5 "\$latest_url" 2>/dev/null | sed 's|.*/tag/v||'
   fi
