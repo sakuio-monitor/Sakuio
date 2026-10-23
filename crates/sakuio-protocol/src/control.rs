@@ -101,7 +101,7 @@ pub struct AgentVersionRange {
 
 /// 兼容区间随面板发布维护：协议变更或新增兼容 Agent 版本时同步调整。
 /// Agent 自动更新只升到该区间内的最新版本；旧面板未下发区间时 Agent 保守地只升当前版本线。
-pub const AGENT_VERSION_RANGE_MIN: &str = "0.0.1";
+pub const AGENT_VERSION_RANGE_MIN: &str = "0.0.8";
 pub const AGENT_VERSION_RANGE_MAX: &str = "0.2.5";
 
 /// Method for board-triggered agent self-update.

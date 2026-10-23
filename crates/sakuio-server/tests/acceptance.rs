@@ -135,6 +135,7 @@ async fn run_case(main: &Backend, metric: &Backend, index: usize) {
     let child = Command::new(env!("CARGO_BIN_EXE_sakuio-server"))
         .current_dir(&dir)
         .env("SAKUIO_LISTEN", format!("127.0.0.1:{port}"))
+        .env("SAKUIO_DATABASE_DSN", &main.dsn)
         .env("RUST_LOG", "error")
         .stdout(Stdio::null())
         .stderr(Stdio::from(log))

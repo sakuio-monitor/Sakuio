@@ -1830,7 +1830,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "sakuio-board"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1846,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-core"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1865,7 +1865,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-db"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1889,7 +1889,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-metric"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1905,7 +1905,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-notify"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "async-trait",
  "lettre",
@@ -1920,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-protocol"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "bytes",
  "cbor4ii",
@@ -1931,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-server"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1978,7 +1978,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-transport-ws"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "async-trait",
  "axum",
