@@ -220,14 +220,11 @@ impl MetricDatabaseSettings {
 
 impl ServerConfig {
     pub fn path() -> Result<PathBuf> {
+        // Production services use their working directory (/opt/sakuio);
+        // cargo run uses the project root. Never fall back to a stale config
+        // in target/debug.
         let cwd = std::env::current_dir().context("resolve working directory")?;
-        let cwd_config = cwd.join(CONFIG_NAME);
-        if cwd_config.exists() {
-            return Ok(cwd_config);
-        }
-        let exe = std::env::current_exe().context("resolve executable path")?;
-        let dir = exe.parent().context("resolve executable directory")?;
-        Ok(dir.join(CONFIG_NAME))
+        Ok(cwd.join(CONFIG_NAME))
     }
 
     pub fn load_or_create() -> Result<Self> {

@@ -38,7 +38,7 @@ use ping_scheduler::PingScheduler;
 use relay::RelayBroker;
 use sakuio_board::{BoardStateStore, MemoryBoardStore};
 use sakuio_core::{AgentCommandBus, LinkSessionHandler, RemoteHub};
-use sakuio_db::{open_bootstrap_db, ClientRepository, DbPool, InstallService, PingRepository};
+use sakuio_db::{ClientRepository, DbPool, InstallService, PingRepository};
 use sakuio_metric::{MetricWriter, MetricWriterConfig};
 use sakuio_notify::Registry;
 use sakuio_transport_ws::{WsLinkState, WS_LINK_PATH};
@@ -308,28 +308,6 @@ async fn main() -> anyhow::Result<()> {
     logging::init();
     site_settings::apply_staged_restore();
     let mut config = config::ServerConfig::load_or_create()?;
-
-    // Legacy installations kept their locator in ./data/sakuio.db. Import it
-    // once, then the YAML file becomes the single source of truth.
-    if !config.database.is_configured()
-        && std::env::var_os("SAKUIO_DATABASE_DSN").is_none()
-        && std::path::Path::new("./data/sakuio.db").exists()
-    {
-        let boot = open_bootstrap_db().await?;
-        let settings = sakuio_db::SettingsRepository::new(boot.pool());
-        let max = settings
-            .get_json::<u32>("app_db_max_connections")
-            .await?
-            .unwrap_or(16);
-        if let Some(dsn) = settings.get_json::<String>("app_db_dsn").await? {
-            config.set_database(&dsn, max);
-        } else {
-            // Older installs used the bootstrap SQLite as the main database.
-            config.set_database(boot.dsn(), max);
-        }
-        config.save()?;
-        boot.shutdown().await;
-    }
 
     let app_db = match open_app_database(&config).await {
         Ok(db) => db,
