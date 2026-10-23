@@ -154,8 +154,6 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Add installer
-        run: cp install.sh dist/install.sh
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
