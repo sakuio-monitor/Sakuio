@@ -4,7 +4,7 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -20,6 +20,16 @@ pub const EVENT_LOGIN: &str = "login";
 pub const EVENT_EXPIRE: &str = "expire";
 pub const EVENT_TRAFFIC: &str = "traffic";
 pub const EVENT_TRAFFIC_EXCEEDED: &str = "traffic_exceeded";
+pub const EVENT_ONLINE: &str = "online";
+pub const EVENT_IP_CHANGE: &str = "ip_change";
+pub const EVENT_CPU_HIGH: &str = "cpu_high";
+pub const EVENT_MEMORY_HIGH: &str = "memory_high";
+pub const EVENT_DISK_HIGH: &str = "disk_high";
+pub const EVENT_SWAP_HIGH: &str = "swap_high";
+pub const EVENT_LOAD_HIGH: &str = "load_high";
+pub const EVENT_BANDWIDTH_HIGH: &str = "bandwidth_high";
+pub const EVENT_GPU_HIGH: &str = "gpu_high";
+pub const EVENT_PROCESS_HIGH: &str = "process_high";
 
 #[derive(Serialize)]
 pub struct ChannelTypeResponse {
@@ -34,6 +44,8 @@ pub struct InstanceSummary {
     pub channel_type: String,
     pub type_name: String,
     pub name: String,
+    pub enabled: bool,
+    pub last_used_at: String,
     pub updated_at: String,
 }
 
@@ -43,6 +55,8 @@ pub struct InstanceDetailResponse {
     pub channel_type: String,
     pub type_name: String,
     pub name: String,
+    pub enabled: bool,
+    pub last_used_at: String,
     pub fields: Vec<sakuio_notify::ConfigField>,
     pub data: Value,
 }
@@ -63,6 +77,11 @@ pub struct UpdateInstanceBody {
 }
 
 #[derive(Deserialize)]
+pub struct EnabledBody {
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
 pub struct TestInstanceBody {
     #[serde(default)]
     pub title: Option<String>,
@@ -78,6 +97,10 @@ pub struct CreateRuleBody {
     pub event_type: String,
     #[serde(default)]
     pub threshold: i64,
+    #[serde(default = "default_duration")]
+    pub duration_secs: i64,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     #[serde(default)]
     pub channels: Vec<String>,
     #[serde(default)]
@@ -94,6 +117,10 @@ pub struct UpdateRuleBody {
     pub event_type: String,
     #[serde(default)]
     pub threshold: i64,
+    #[serde(default = "default_duration")]
+    pub duration_secs: i64,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     #[serde(default)]
     pub channels: Vec<String>,
     #[serde(default)]
@@ -104,10 +131,27 @@ pub struct UpdateRuleBody {
     pub template_body: String,
 }
 
+fn default_duration() -> i64 { 300 }
+fn default_enabled() -> bool { true }
+
 fn valid_event(event: &str) -> bool {
     matches!(
         event,
-        EVENT_OFFLINE | EVENT_LOGIN | EVENT_EXPIRE | EVENT_TRAFFIC
+        EVENT_OFFLINE
+            | EVENT_LOGIN
+            | EVENT_EXPIRE
+            | EVENT_TRAFFIC
+            | EVENT_TRAFFIC_EXCEEDED
+            | EVENT_ONLINE
+            | EVENT_IP_CHANGE
+            | EVENT_CPU_HIGH
+            | EVENT_MEMORY_HIGH
+            | EVENT_DISK_HIGH
+            | EVENT_SWAP_HIGH
+            | EVENT_LOAD_HIGH
+            | EVENT_BANDWIDTH_HIGH
+            | EVENT_GPU_HIGH
+            | EVENT_PROCESS_HIGH
     )
 }
 
@@ -117,6 +161,8 @@ fn rule_from_row(row: NotificationRuleRow, detailed: bool) -> Value {
         "name": row.name,
         "event_type": row.event_type,
         "threshold": row.threshold,
+        "duration_secs": row.duration_secs,
+        "enabled": row.enabled,
         "channels": row.channels,
         "clients": row.clients,
         "template_title": row.template_title,
@@ -162,6 +208,8 @@ pub async fn list_instances(
             channel_type: row.channel_type,
             type_name,
             name: row.name,
+            enabled: row.enabled,
+            last_used_at: row.last_used_at,
             updated_at: row.updated_at,
         });
     }
@@ -190,6 +238,8 @@ pub async fn get_instance(
         channel_type: row.channel_type,
         type_name: meta.name,
         name: row.name,
+        enabled: row.enabled,
+        last_used_at: row.last_used_at,
         fields: meta.fields,
         data: row.config,
     }))
@@ -250,7 +300,7 @@ pub async fn update_instance(
         return Err(StatusCode::BAD_REQUEST);
     }
     let ok = repo
-        .update(&id, name, true, &body.data)
+        .update(&id, name, existing.enabled, &body.data)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if ok {
@@ -313,7 +363,34 @@ pub async fn test_instance(
             );
             StatusCode::BAD_GATEWAY
         })?;
+    let _ = repo.touch_instance(&id).await;
     Ok(Json(json!({ "success": true })))
+}
+
+pub async fn set_instance_enabled(
+    State(state): State<AppState>,
+    _user: AdminUser,
+    Path(id): Path<String>,
+    Json(body): Json<EnabledBody>,
+) -> Result<StatusCode, StatusCode> {
+    let ok = NotificationRepository::new(&state.db)
+        .set_instance_enabled(&id, body.enabled)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if ok { Ok(StatusCode::NO_CONTENT) } else { Err(StatusCode::NOT_FOUND) }
+}
+
+pub async fn set_rule_enabled(
+    State(state): State<AppState>,
+    _user: AdminUser,
+    Path(id): Path<String>,
+    Json(body): Json<EnabledBody>,
+) -> Result<StatusCode, StatusCode> {
+    let ok = NotificationRepository::new(&state.db)
+        .set_rule_enabled(&id, body.enabled)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if ok { Ok(StatusCode::NO_CONTENT) } else { Err(StatusCode::NOT_FOUND) }
 }
 
 // ---------------------------------------------------------------- rules
@@ -361,6 +438,8 @@ pub async fn create_rule(
             name,
             body.event_type.trim(),
             body.threshold.max(0),
+            body.duration_secs.max(0),
+            body.enabled,
             &body.channels,
             &body.clients,
             body.template_title.trim(),
@@ -387,6 +466,8 @@ pub async fn update_rule(
             name,
             body.event_type.trim(),
             body.threshold.max(0),
+            body.duration_secs.max(0),
+            body.enabled,
             &body.channels,
             &body.clients,
             body.template_title.trim(),
@@ -449,6 +530,16 @@ fn rule_matches_client(rule: &NotificationRuleRow, node_uuid: &str) -> bool {
 fn default_title(event: &str) -> String {
     match event {
         EVENT_OFFLINE => "{{node_name}} 离线告警".into(),
+        EVENT_ONLINE => "{{node_name}} 已上线".into(),
+        EVENT_IP_CHANGE => "{{node_name}} IP 地址变更".into(),
+        EVENT_CPU_HIGH => "{{node_name}} CPU 持续高占用".into(),
+        EVENT_MEMORY_HIGH => "{{node_name}} 内存持续高占用".into(),
+        EVENT_DISK_HIGH => "{{node_name}} 磁盘持续高占用".into(),
+        EVENT_SWAP_HIGH => "{{node_name}} Swap 持续高占用".into(),
+        EVENT_LOAD_HIGH => "{{node_name}} 负载持续过高".into(),
+        EVENT_BANDWIDTH_HIGH => "{{node_name}} 带宽持续过高".into(),
+        EVENT_GPU_HIGH => "{{node_name}} GPU 持续高占用".into(),
+        EVENT_PROCESS_HIGH => "{{node_name}} 进程数持续过高".into(),
         EVENT_LOGIN => "管理员登录".into(),
         EVENT_EXPIRE => "{{node_name}} 即将到期".into(),
         EVENT_TRAFFIC => "{{node_name}} 流量告警".into(),
@@ -460,6 +551,16 @@ fn default_title(event: &str) -> String {
 fn default_body(event: &str) -> String {
     match event {
         EVENT_OFFLINE => "{{node_name}} 已离线超过 {{grace_period}} 秒（{{time}}）。".into(),
+        EVENT_ONLINE => "{{node_name}} 已恢复在线（{{time}}）。".into(),
+        EVENT_IP_CHANGE => "{{node_name}} IP 已从 {{old_ip}} 变更为 {{new_ip}}（{{time}}）。".into(),
+        EVENT_CPU_HIGH => "{{node_name}} CPU 占用已连续 {{duration}} 秒超过 {{threshold}}%（当前 {{metric_value}}%，{{time}}）。".into(),
+        EVENT_MEMORY_HIGH => "{{node_name}} 内存占用已连续 {{duration}} 秒超过 {{threshold}}%（当前 {{metric_value}}%，{{time}}）。".into(),
+        EVENT_DISK_HIGH => "{{node_name}} 磁盘占用已连续 {{duration}} 秒超过 {{threshold}}%（当前 {{metric_value}}%，{{time}}）。".into(),
+        EVENT_SWAP_HIGH => "{{node_name}} Swap 占用已连续 {{duration}} 秒超过 {{threshold}}%（当前 {{metric_value}}%，{{time}}）。".into(),
+        EVENT_LOAD_HIGH => "{{node_name}} 负载已连续 {{duration}} 秒超过 {{threshold}}（当前 {{metric_value}}，{{time}}）。".into(),
+        EVENT_BANDWIDTH_HIGH => "{{node_name}} 带宽已连续 {{duration}} 秒超过 {{threshold}} Mbps（当前 {{metric_value}} Mbps，{{time}}）。".into(),
+        EVENT_GPU_HIGH => "{{node_name}} GPU 占用已连续 {{duration}} 秒超过 {{threshold}}%（当前 {{metric_value}}%，{{time}}）。".into(),
+        EVENT_PROCESS_HIGH => "{{node_name}} 进程数已连续 {{duration}} 秒超过 {{threshold}}（当前 {{metric_value}}，{{time}}）。".into(),
         EVENT_LOGIN => "用户 {{username}} 于 {{time}} 登录管理后台。".into(),
         EVENT_EXPIRE => {
             "{{node_name}} 将于 {{expire_date}} 到期，剩余 {{days_left}} 天。".into()
@@ -494,7 +595,7 @@ pub async fn dispatch_event(
     };
     let now = Utc::now().to_rfc3339();
     for rule in rules {
-        if rule.event_type != event_type || !rule_matches_client(&rule, node_uuid) {
+        if !rule.enabled || rule.event_type != event_type || !rule_matches_client(&rule, node_uuid) {
             continue;
         }
         let mut vars: HashMap<String, String> = extra_vars
@@ -522,6 +623,9 @@ pub async fn dispatch_event(
             let Some(row) = repo.get_by_id(instance_id).await.ok().flatten() else {
                 continue;
             };
+            if !row.enabled {
+                continue;
+            }
             if let Err(e) = state
                 .notify
                 .send(&row.channel_type, &row.config, &msg)
@@ -533,6 +637,8 @@ pub async fn dispatch_event(
                     error = %e,
                     "notification rule dispatch failed"
                 );
+            } else {
+                let _ = repo.touch_instance(instance_id).await;
             }
         }
     }
@@ -548,6 +654,46 @@ struct WatcherState {
     offline: HashMap<String, OfflineEpisode>,
     expire_notified: HashMap<String, String>,
     traffic_notified: HashMap<String, i64>,
+    known_online: HashMap<String, bool>,
+    last_ips: HashMap<String, String>,
+    metric_since: HashMap<String, DateTime<Utc>>,
+    metric_notified: HashSet<String>,
+}
+
+fn metric_event_value(event: &str, snap: &sakuio_board::RuntimeSnapshot) -> Option<f64> {
+    match event {
+        EVENT_CPU_HIGH => snap.cpu_usage,
+        EVENT_MEMORY_HIGH => snap.mem_used.zip(snap.mem_total).and_then(|(used, total)| {
+            (total > 0).then_some(used as f64 / total as f64 * 100.0)
+        }),
+        EVENT_DISK_HIGH => snap.disk_used.zip(snap.disk_total).and_then(|(used, total)| {
+            (total > 0).then_some(used as f64 / total as f64 * 100.0)
+        }),
+        EVENT_SWAP_HIGH => snap.swap_used.zip(snap.swap_total).and_then(|(used, total)| {
+            (total > 0).then_some(used as f64 / total as f64 * 100.0)
+        }),
+        EVENT_LOAD_HIGH => snap.load1,
+        EVENT_BANDWIDTH_HIGH => snap.net_up.zip(snap.net_down).map(|(up, down)| {
+            (up.saturating_add(down) as f64 * 8.0) / 1_000_000.0
+        }),
+        EVENT_GPU_HIGH => snap.gpu_usage.map(f64::from),
+        EVENT_PROCESS_HIGH => snap.process.map(f64::from),
+        _ => None,
+    }
+}
+
+fn is_metric_event(event: &str) -> bool {
+    matches!(
+        event,
+        EVENT_CPU_HIGH
+            | EVENT_MEMORY_HIGH
+            | EVENT_DISK_HIGH
+            | EVENT_SWAP_HIGH
+            | EVENT_LOAD_HIGH
+            | EVENT_BANDWIDTH_HIGH
+            | EVENT_GPU_HIGH
+            | EVENT_PROCESS_HIGH
+    )
 }
 
 fn fmt_gb(bytes: u64) -> String {
@@ -608,6 +754,97 @@ async fn tick_watcher(state: &AppState, watcher: &Mutex<WatcherState>) -> Result
     }
     let now = Utc::now();
     let mut guard = watcher.lock().await;
+    let clients = list_all_admin_clients(state).await?;
+
+    // Online transitions and IP changes.
+    let online_rules: Vec<&NotificationRuleRow> = rules
+        .iter()
+        .filter(|r| r.event_type == EVENT_ONLINE)
+        .collect();
+    let ip_rules: Vec<&NotificationRuleRow> = rules
+        .iter()
+        .filter(|r| r.event_type == EVENT_IP_CHANGE)
+        .collect();
+    for row in &clients {
+        if let Some(previous) = guard.known_online.insert(row.uuid.clone(), row.online) {
+            if !previous && row.online {
+                for rule in &online_rules {
+                    if !rule_matches_client(rule, &row.uuid) {
+                        continue;
+                    }
+                    dispatch_event(state, EVENT_ONLINE, &row.uuid, &row.name, &[]).await;
+                }
+            }
+        }
+        let current_ip = if row.ipv4.trim().is_empty() {
+            row.ipv6.trim().to_string()
+        } else if row.ipv6.trim().is_empty() {
+            row.ipv4.trim().to_string()
+        } else {
+            format!("{} / {}", row.ipv4.trim(), row.ipv6.trim())
+        };
+        if let Some(previous) = guard.last_ips.insert(row.uuid.clone(), current_ip.clone()) {
+            if !previous.is_empty() && !current_ip.is_empty() && previous != current_ip {
+                for rule in &ip_rules {
+                    if !rule_matches_client(rule, &row.uuid) {
+                        continue;
+                    }
+                    dispatch_event(
+                        state,
+                        EVENT_IP_CHANGE,
+                        &row.uuid,
+                        &row.name,
+                        &[("old_ip", previous.clone()), ("new_ip", current_ip.clone())],
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    // Sustained CPU / memory / disk / swap / load / bandwidth / GPU / process rules.
+    let metric_rules: Vec<&NotificationRuleRow> = rules
+        .iter()
+        .filter(|r| is_metric_event(&r.event_type))
+        .collect();
+    if !metric_rules.is_empty() {
+        for row in &clients {
+            let Some(snap) = state.board.get_latest_snapshot(&row.uuid).await.ok().flatten() else {
+                continue;
+            };
+            for rule in &metric_rules {
+                if !rule_matches_client(rule, &row.uuid) {
+                    continue;
+                }
+                let Some(value) = metric_event_value(&rule.event_type, &snap) else {
+                    continue;
+                };
+                let key = format!("{}:{}:{}", rule.id, row.uuid, rule.event_type);
+                if value < rule.threshold as f64 {
+                    guard.metric_since.remove(&key);
+                    guard.metric_notified.remove(&key);
+                    continue;
+                }
+                let since = *guard.metric_since.entry(key.clone()).or_insert(now);
+                let duration = rule.duration_secs.max(0);
+                if (now - since).num_seconds() < duration || !guard.metric_notified.insert(key.clone()) {
+                    continue;
+                }
+                dispatch_event(
+                    state,
+                    &rule.event_type,
+                    &row.uuid,
+                    &row.name,
+                    &[
+                        ("metric_value", format!("{value:.1}")),
+                        ("threshold", rule.threshold.to_string()),
+                        ("duration", duration.to_string()),
+                    ],
+                )
+                .await;
+            }
+        }
+    }
 
     // Expire rules: fire at most once per day per node.
     let expire_rules: Vec<&NotificationRuleRow> = rules
@@ -615,7 +852,7 @@ async fn tick_watcher(state: &AppState, watcher: &Mutex<WatcherState>) -> Result
         .filter(|r| r.event_type == EVENT_EXPIRE)
         .collect();
     if !expire_rules.is_empty() {
-        for row in list_all_admin_clients(state).await? {
+        for row in &clients {
             let Some(expired_raw) = row.expired_at.clone().filter(|s| !s.trim().is_empty()) else {
                 continue;
             };
@@ -657,7 +894,7 @@ async fn tick_watcher(state: &AppState, watcher: &Mutex<WatcherState>) -> Result
         .filter(|r| r.event_type == EVENT_TRAFFIC && r.threshold > 0)
         .collect();
     if !traffic_rules.is_empty() {
-        for row in list_all_admin_clients(state).await? {
+        for row in &clients {
             let Some(snap) = state
                 .board
                 .get_latest_snapshot(&row.uuid)
@@ -712,9 +949,8 @@ async fn tick_watcher(state: &AppState, watcher: &Mutex<WatcherState>) -> Result
         .collect();
     if offline_rules.is_empty() {
         guard.offline.clear();
-        return Ok(());
-    }
-    for row in list_all_admin_clients(state).await? {
+    } else {
+    for row in &clients {
         if row.online {
             guard.offline.remove(&row.uuid);
             continue;
@@ -750,6 +986,7 @@ async fn tick_watcher(state: &AppState, watcher: &Mutex<WatcherState>) -> Result
             )
             .await;
         }
+    }
     }
     Ok(())
 }

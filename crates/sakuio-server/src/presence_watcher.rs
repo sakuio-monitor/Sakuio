@@ -37,6 +37,7 @@ pub async fn spawn_presence_watcher(state: AppState) {
             );
             for uuid in &uuids {
                 clear_snapshot(&state.board, uuid).await;
+                audit_offline(&state, uuid, "cleared stale online flag at startup");
             }
         }
         Ok(_) => {}
@@ -50,6 +51,9 @@ pub async fn spawn_presence_watcher(state: AppState) {
         let mut ticker = tokio::time::interval(Duration::from_secs(10));
         loop {
             ticker.tick().await;
+            if sakuio_db::maintenance_active() {
+                continue;
+            }
             let clients = ClientRepository::new(&state.db);
             match clients.mark_stale_offline(STALE_SECS).await {
                 Ok(uuids) if !uuids.is_empty() => {
@@ -59,6 +63,7 @@ pub async fn spawn_presence_watcher(state: AppState) {
                             "client marked offline by heartbeat watchdog"
                         );
                         clear_snapshot(&state.board, uuid).await;
+                        audit_offline(&state, uuid, "heartbeat timeout");
                     }
                 }
                 Ok(_) => {}
@@ -76,6 +81,40 @@ pub async fn spawn_presence_watcher(state: AppState) {
 /// only touches snapshots created during the current process lifetime.
 /// 尽力覆写缓存的快照，让图表/列表不再显示该节点在线。
 /// 重启后内存 store 为空，因此只会影响本次进程生命周期内产生的快照。
+fn audit_offline(state: &AppState, node_uuid: &str, reason: &'static str) {
+    let db = state.db.clone();
+    let node_uuid = node_uuid.to_string();
+    tokio::spawn(async move {
+        let ip = ClientRepository::new(&db)
+            .address_by_uuid(&node_uuid)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let geo = sakuio_db::GeoCacheRepository::new(&db)
+            .get(&ip)
+            .await
+            .ok()
+            .flatten();
+        let (geo_code, geo_location) = geo
+            .map(|row| (row.country_code, row.location))
+            .unwrap_or_default();
+        if let Err(error) = sakuio_db::record_system_event(
+            &db,
+            "SERVER_OFFLINE",
+            &node_uuid,
+            reason,
+            &ip,
+            &geo_code,
+            &geo_location,
+        )
+        .await
+        {
+            tracing::warn!(node_uuid = %node_uuid, error = %error, "presence audit write failed");
+        }
+    });
+}
+
 async fn clear_snapshot(board: &sakuio_board::MemoryBoardStore, node_uuid: &str) {
     if let Ok(Some(mut snap)) = board.get_latest_snapshot(node_uuid).await {
         if snap.online {

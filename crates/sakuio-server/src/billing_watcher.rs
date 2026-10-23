@@ -65,6 +65,9 @@ pub fn spawn_billing_watcher(state: AppState) {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(TICK_SECS));
         loop {
             ticker.tick().await;
+            if sakuio_db::maintenance_active() {
+                continue;
+            }
             if let Err(e) = tick_billing(&state, &watcher).await {
                 tracing::warn!(error = %e, "billing watcher tick failed");
             }
@@ -116,7 +119,10 @@ fn push_cycle(base: DateTime<Utc>, cycle_days: i32) -> Option<DateTime<Utc>> {
 
 async fn tick_billing(state: &AppState, watcher: &Mutex<WatcherState>) -> Result<(), String> {
     let repo = ClientRepository::new(&state.db);
-    let ledger = repo.list_traffic_ledger().await.map_err(|e| e.to_string())?;
+    let ledger = repo
+        .list_traffic_ledger()
+        .await
+        .map_err(|e| e.to_string())?;
     let now = Utc::now();
     let mut guard = watcher.lock().await;
 
@@ -255,11 +261,7 @@ async fn tick_billing(state: &AppState, watcher: &Mutex<WatcherState>) -> Result
         if !row.auto_renewal || !row.online || row.billing_cycle == CYCLE_ONCE {
             continue;
         }
-        let Some(expired_raw) = row
-            .expired_at
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-        else {
+        let Some(expired_raw) = row.expired_at.clone().filter(|s| !s.trim().is_empty()) else {
             continue;
         };
         let Some(expire_at) = parse_expire_date(&expired_raw) else {
