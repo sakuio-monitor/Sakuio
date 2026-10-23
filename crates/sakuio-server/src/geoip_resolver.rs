@@ -8,6 +8,13 @@ use chrono::{SecondsFormat, Utc};
 use sakuio_db::{ClientRepository, DbPool, GeoCacheRepository, PublicClientRow};
 use sakuio_notify::ipgeo::GeoInfo;
 use std::collections::{HashMap, HashSet};
+
+/// Wakes the geo resolver immediately after an agent reports a new IP.
+static GEO_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+pub fn wake_geo_resolver() {
+    GEO_WAKE.notify_one();
+}
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Mutex as AsyncMutex};
@@ -269,6 +276,13 @@ pub fn spawn_geoip_resolver(state: AppState) {
                 _ = ticker.tick() => {
                     if let Err(e) = tick(&state, &mut last_provider).await {
                         tracing::warn!(error = %e, "geoip resolver tick failed");
+                    }
+                }
+                _ = GEO_WAKE.notified() => {
+                    // Debounce a burst of agents connecting at once.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    if let Err(e) = tick(&state, &mut last_provider).await {
+                        tracing::warn!(error = %e, "geoip resolver wake failed");
                     }
                 }
                 _ = cleanup_ticker.tick() => {

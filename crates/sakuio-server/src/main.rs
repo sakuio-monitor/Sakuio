@@ -372,7 +372,8 @@ async fn main() -> anyhow::Result<()> {
     let relay = RelayBroker::new();
     let link_handler = Arc::new(
         LinkSessionHandler::with_memory_board(pool.clone(), board.clone(), metric_writer)
-            .with_remote_hub(remote.clone()),
+            .with_remote_hub(remote.clone())
+            .with_geo_wake(Arc::new(crate::geoip_resolver::wake_geo_resolver)),
     );
 
     let link = WsLinkState {

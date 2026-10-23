@@ -25,6 +25,7 @@ pub struct LinkSessionHandler {
     board: Arc<dyn BoardStateStore>,
     ingest: IngestPipeline,
     remote: Option<Arc<RemoteHub>>,
+    geo_wake: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl LinkSessionHandler {
@@ -37,7 +38,14 @@ impl LinkSessionHandler {
             board,
             ingest,
             remote: None,
+            geo_wake: None,
         }
+    }
+
+    /// Registers a callback fired after a node reports new basic information.
+    pub fn with_geo_wake(mut self, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.geo_wake = Some(wake);
+        self
     }
 
     pub fn with_remote_hub(mut self, remote: Arc<RemoteHub>) -> Self {
@@ -203,6 +211,9 @@ impl BoardSessionHandler for LinkSessionHandler {
                     )
                     .await
                     .map_err(|e| e.to_string())?;
+                if let Some(wake) = &self.geo_wake {
+                    wake();
+                }
                 clients
                     .touch_last_seen(node_uuid)
                     .await
