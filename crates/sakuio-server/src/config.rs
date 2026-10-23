@@ -32,6 +32,9 @@ pub struct DatabaseSettings {
     pub user: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub password: String,
+    /// Optional TLS mode for PostgreSQL/MySQL (require, verify-full, ...).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ssl_mode: String,
     /// SQLite file path, relative to the service working directory.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub path: String,
@@ -69,6 +72,7 @@ impl Default for DatabaseSettings {
             database: String::new(),
             user: String::new(),
             password: String::new(),
+            ssl_mode: String::new(),
             path: String::new(),
             max_connections: DEFAULT_MAIN_MAX,
             min_idle_connections: 0,
@@ -142,7 +146,15 @@ impl DatabaseSettings {
         let host = if self.host.trim().is_empty() { "127.0.0.1" } else { self.host.trim() };
         let port = if self.port == 0 { default_port } else { self.port };
         let database = self.database.trim();
-        format!("{scheme}://{user}:{password}@{host}:{port}/{database}")
+        let mut dsn = format!("{scheme}://{user}:{password}@{host}:{port}/{database}");
+        if !self.ssl_mode.trim().is_empty() {
+            let key = if scheme == "postgres" { "sslmode" } else { "ssl-mode" };
+            dsn.push('?');
+            dsn.push_str(key);
+            dsn.push('=');
+            dsn.push_str(self.ssl_mode.trim());
+        }
+        dsn
     }
 
     pub fn from_dsn(dsn: &str, max_connections: u32) -> Self {
@@ -178,6 +190,11 @@ impl DatabaseSettings {
                 .password()
                 .map(|value| percent_decode_str(value).decode_utf8_lossy().to_string())
                 .unwrap_or_default();
+            for (key, value) in url.query_pairs() {
+                if key == "sslmode" || key == "ssl-mode" {
+                    result.ssl_mode = value.to_string();
+                }
+            }
         }
         result
     }

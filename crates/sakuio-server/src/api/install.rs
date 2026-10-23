@@ -9,6 +9,7 @@ use sakuio_db::{
     complete_install, test_config_database, AppDatabase, CompleteInstallRequest, InstallService,
     TestDbRequest,
 };
+use serde::Deserialize;
 use std::net::SocketAddr;
 
 /// GET `/api/install/status`.
@@ -68,9 +69,18 @@ pub async fn install_test_db(
 /// POST `/api/install/database` — validate and persist the database before the
 /// administrator/site steps. The process restarts so the next wizard steps run
 /// against the real database, not the in-memory setup runtime.
+#[derive(Debug, Deserialize)]
+pub struct InstallDatabaseRequest {
+    pub app_db: crate::config::DatabaseSettings,
+    #[serde(default)]
+    pub metric_mode: Option<String>,
+    #[serde(default)]
+    pub metric_db: Option<crate::config::DatabaseSettings>,
+}
+
 pub async fn install_database(
     State(state): State<AppState>,
-    Json(body): Json<TestDbRequest>,
+    Json(body): Json<InstallDatabaseRequest>,
 ) -> Response {
     {
         let gate = state.install_gate.read().await;
@@ -82,15 +92,15 @@ pub async fn install_database(
                 .into_response();
         }
     }
-    let dsn = body.app_db_dsn.trim();
-    if dsn.is_empty() {
+    if !body.app_db.is_configured() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "message": "database DSN is required" })),
+            Json(serde_json::json!({ "message": "database driver is not configured" })),
         )
             .into_response();
     }
-    let target = match AppDatabase::connect(dsn, true).await {
+    let dsn = body.app_db.dsn();
+    let target = match AppDatabase::connect(&dsn, true).await {
         Ok(target) => target,
         Err(e) => {
             tracing::warn!(error = %e, "install database connection failed");
@@ -101,7 +111,28 @@ pub async fn install_database(
                 .into_response();
         }
     };
-    if let Err(e) = crate::config::update_database(target.dsn(), 16) {
+    let mut config = match crate::config::ServerConfig::load_or_create() {
+        Ok(config) => config,
+        Err(e) => {
+            target.shutdown().await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "message": format!("load config.yaml failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    config.database = body.app_db;
+    config.metric_database = match (body.metric_mode.as_deref(), body.metric_db) {
+        (Some("separate"), Some(metric)) if metric.is_configured() => {
+            crate::config::MetricDatabaseSettings {
+                mode: "separate".into(),
+                connection: metric,
+            }
+        }
+        _ => crate::config::MetricDatabaseSettings::default(),
+    };
+    if let Err(e) = config.save() {
         target.shutdown().await;
         tracing::error!(error = %e, "write install database config failed");
         return (

@@ -25,6 +25,7 @@ database:
 #   database: sakuio
 #   user: sakuio
 #   password: change-me
+#   ssl_mode: prefer
 #   max_connections: 16
 
 # MySQL / MariaDB example:
@@ -35,6 +36,7 @@ database:
 #   database: sakuio
 #   user: sakuio
 #   password: change-me
+#   ssl_mode: prefer
 #   max_connections: 16
 
 # ---- Metric database -------------------------------------------------------
@@ -52,4 +54,5 @@ metric_database:
 #   database: sakuio_metrics
 #   user: sakuio
 #   password: change-me
+#   ssl_mode: prefer
 #   max_connections: 25
