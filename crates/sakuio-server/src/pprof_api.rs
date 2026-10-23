@@ -15,7 +15,8 @@ use serde::Serialize;
 use serde_json::json;
 use sqlx::Row;
 use std::convert::Infallible;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Once;
 use std::time::Duration;
 use sysinfo::{Disks, Pid, ProcessesToUpdate, System};
 
@@ -43,6 +44,23 @@ pub struct RuntimeSnapshot {
     pub heap_preview: String,
 }
 
+static DB_ACTIVE_PEAK: AtomicU64 = AtomicU64::new(0);
+static DB_MONITOR: Once = Once::new();
+
+fn ensure_pool_monitor(pool: &sakuio_db::DbPool) {
+    let pool = pool.clone();
+    DB_MONITOR.call_once(|| {
+        tokio::spawn(async move {
+            loop {
+                let inner = pool.inner();
+                let active = inner.size().saturating_sub(inner.num_idle() as u32) as u64;
+                DB_ACTIVE_PEAK.fetch_max(active, Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+    });
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DatabaseMetrics {
     pub kind: String,
@@ -51,6 +69,7 @@ pub struct DatabaseMetrics {
     pub disk_available: u64,
     pub connections: u64,
     pub active_connections: u64,
+    pub peak_connections: u64,
     pub idle_connections: u64,
     pub max_connections: u64,
     pub queries_per_sec: f64,
@@ -421,10 +440,12 @@ fn memory_map_for(sampler: &mut Sampler) -> crate::memory_map::MemoryMapStats {
 }
 
 async fn database_metrics(state: &AppState, sampler: &mut Sampler) -> DatabaseMetrics {
+    ensure_pool_monitor(&state.db);
     let kind = state.db.kind().as_str().to_string();
     let connections = state.db.inner().size() as u64;
     let idle_connections = state.db.inner().num_idle() as u64;
     let active_connections = connections.saturating_sub(idle_connections);
+    let peak_connections = DB_ACTIVE_PEAK.swap(0, Ordering::Relaxed).max(active_connections);
     let max_connections = state.db.max_connections() as u64;
     let writes_total = sakuio_db::DB_WRITES.load(Ordering::Relaxed);
     let queries_total = sakuio_db::DB_QUERIES.load(Ordering::Relaxed);
@@ -475,7 +496,7 @@ async fn database_metrics(state: &AppState, sampler: &mut Sampler) -> DatabaseMe
         usage
     };
     let write_pressure_percent = if max_connections > 0 {
-        (active_connections as f64 / max_connections as f64 * 100.0).clamp(0.0, 100.0)
+        (peak_connections as f64 / max_connections as f64 * 100.0).clamp(0.0, 100.0)
     } else {
         0.0
     };
@@ -486,6 +507,7 @@ async fn database_metrics(state: &AppState, sampler: &mut Sampler) -> DatabaseMe
         disk_available,
         connections,
         active_connections,
+        peak_connections,
         idle_connections,
         max_connections,
         queries_per_sec,
