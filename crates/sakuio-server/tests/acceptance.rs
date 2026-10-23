@@ -706,7 +706,7 @@ async fn main_database_switch_restarts_into_target() {
         ],
         None,
     );
-    assert_eq!(same.0, 400, "same database switch: {}", same.1);
+    assert_eq!(same.0, 200, "same database switch: {}", same.1);
 
     // A second hop (PostgreSQL -> MySQL) proves the copy path into MySQL too.
     // 再切一跳（PostgreSQL -> MySQL），覆盖复制到 MySQL 的路径。

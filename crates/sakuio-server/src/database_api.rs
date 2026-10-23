@@ -369,14 +369,15 @@ pub async fn update_main_database(
     };
     probe.shutdown().await;
     if same {
-        state
-            .metric
-            .tasks
-            .finish(Some("target database is the current main database".into()));
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "target database is the current main database",
-        ));
+        // Saving the current database from the settings page is a no-op, not
+        // an error. The max-connection branch above may already have persisted
+        // a new limit.
+        state.metric.tasks.finish(None);
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "unchanged": true,
+            "restart_required": false,
+        })));
     }
 
     let tasks = state.metric.tasks.clone();
