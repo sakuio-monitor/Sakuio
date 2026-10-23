@@ -36,25 +36,64 @@ fn should_audit(method: &Method, path: &str) -> bool {
             || (path.contains("/nodes/") && (path.ends_with("/shell") || path.contains("/fs/"))))
 }
 
-/// Best-effort client address; proxy headers are preferred like the login flow.
-/// 尽力获取客户端地址；与登录流程一致，优先代理头。
+/// Best-effort client address. Reverse-proxy headers are checked in priority
+/// order and every candidate is parsed as an IP so a spoofed/garbage header
+/// cannot become an audit key.
 pub fn client_ip(headers: &HeaderMap, addr: Option<SocketAddr>) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|value| value.to_str().ok())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| addr.map(|addr| addr.ip().to_string()).unwrap_or_default())
+    // Only trust forwarding headers from a local/private hop. A direct public
+    // client must not be able to choose its own audit IP.
+    let trusted_hop = addr.is_some_and(|addr| match addr.ip() {
+        std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        std::net::IpAddr::V6(ip) => {
+            ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+        }
+    });
+    if trusted_hop {
+        for name in [
+            "cf-connecting-ip",
+            "true-client-ip",
+            "x-real-ip",
+            "x-client-ip",
+            "x-cluster-client-ip",
+            "x-forwarded-for",
+            "forwarded",
+        ] {
+            if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
+                let candidate = if name == "forwarded" {
+                    value
+                        .split(';')
+                        .find_map(|part| part.trim().strip_prefix("for="))
+                        .unwrap_or(value)
+                } else {
+                    value.split(',').next().unwrap_or(value)
+                };
+                if let Some(ip) = parse_forwarded_ip(candidate) {
+                    return ip;
+                }
+            }
+        }
+    }
+    addr.map(|addr| addr.ip().to_string()).unwrap_or_default()
+}
+
+fn parse_forwarded_ip(value: &str) -> Option<String> {
+    let mut value = value.trim().trim_matches('"');
+    if let Some(rest) = value.strip_prefix('[') {
+        let end = rest.find(']')?;
+        let ip = &rest[..end];
+        return ip.parse::<std::net::IpAddr>().ok().map(|ip| ip.to_string());
+    }
+    if value.matches(':').count() == 1 {
+        if let Some((host, port)) = value.rsplit_once(':') {
+            if port.chars().all(|c| c.is_ascii_digit()) {
+                value = host;
+            }
+        }
+    }
+    value
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| ip.to_string())
 }
 
 fn request_ip(request: &Request) -> String {
@@ -163,4 +202,40 @@ pub async fn audit_admin_layer(
     };
     state.audit.record(entry);
     response
+}
+
+#[cfg(test)]
+mod client_ip_tests {
+    use super::*;
+    use axum::http::HeaderValue;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn proxy_addr() -> Option<SocketAddr> {
+        Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345))
+    }
+
+    #[test]
+    fn reads_cloudflare_and_forwarded_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
+        headers.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.7, 10.0.0.1"));
+        assert_eq!(client_ip(&headers, proxy_addr()), "203.0.113.9");
+    }
+
+    #[test]
+    fn strips_forwarded_ports_and_brackets() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.9:443"));
+        assert_eq!(client_ip(&headers, proxy_addr()), "203.0.113.9");
+        headers.insert("x-real-ip", HeaderValue::from_static("[2001:db8::1]:443"));
+        assert_eq!(client_ip(&headers, proxy_addr()), "2001:db8::1");
+    }
+
+    #[test]
+    fn ignores_headers_from_untrusted_public_hop() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.9"));
+        let public = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 12345));
+        assert_eq!(client_ip(&headers, public), "8.8.8.8");
+    }
 }
