@@ -48,11 +48,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
-printf '\n========================================\n'
-printf ' Sakuio Server 安装程序\n'
-printf '========================================\n\n'
-
-if [[ -t 1 ]]; then
+if [[ -t 1 || -r /dev/tty ]]; then
   C_RESET=$'\033[0m'
   C_BOLD=$'\033[1m'
   C_DIM=$'\033[2m'
@@ -64,12 +60,16 @@ else
   C_RESET=""; C_BOLD=""; C_DIM=""; C_CYAN=""; C_GREEN=""; C_YELLOW=""; C_RED=""
 fi
 
+printf '\n%s========================================%s\n' "$C_CYAN" "$C_RESET"
+printf ' %sSakuio Server 安装程序%s\n' "$C_BOLD" "$C_RESET"
+printf '%s========================================%s\n\n' "$C_CYAN" "$C_RESET"
+
 # Short command (`curl ... | sudo bash`) asks only for the essentials.
 # When stdin is the script pipe, read prompts from /dev/tty.
 ask_tty() {
   local prompt="$1" default="$2" answer=""
   if [[ -r /dev/tty && -w /dev/tty ]]; then
-    printf '%s\n  %s>%s ' "$prompt" "$C_GREEN" "$C_RESET" > /dev/tty
+    printf '%b\n  %s>%s ' "$prompt" "$C_GREEN" "$C_RESET" > /dev/tty
     read -r answer < /dev/tty || true
   fi
   printf '%s' "${answer:-$default}"
@@ -77,8 +77,15 @@ ask_tty() {
 
 SCRIPT_ONLY=0
 if [[ "$INTERACTIVE" -eq 1 ]]; then
-  dir_input="$(ask_tty "${C_BOLD}请输入安装目录${C_RESET}\n${C_DIM}直接回车使用 /opt/sakuio${C_RESET}" "/opt/sakuio")"
-  INSTALL_DIR="${dir_input:-/opt/sakuio}"
+  DEFAULT_INSTALL_DIR="/opt/sakuio"
+  INSTALL_DIR="$DEFAULT_INSTALL_DIR"
+
+  # Re-running for an existing default installation goes straight to the
+  # update menu. A custom directory is asked only when nothing is installed.
+  if [[ ! -x "$INSTALL_DIR/sakuio-server" && ! -f "$INSTALL_DIR/config.yaml" ]]; then
+    dir_input="$(ask_tty "${C_BOLD}请输入安装目录${C_RESET}\n${C_DIM}直接回车使用 /opt/sakuio${C_RESET}" "/opt/sakuio")"
+    INSTALL_DIR="${dir_input:-/opt/sakuio}"
+  fi
 
   if [[ -x "$INSTALL_DIR/sakuio-server" || -f "$INSTALL_DIR/config.yaml" ]]; then
     printf '\n%s已检测到安装%s：%s\n\n' "$C_YELLOW" "$C_RESET" "$INSTALL_DIR"
@@ -91,18 +98,23 @@ if [[ "$INTERACTIVE" -eq 1 ]]; then
         1) SCRIPT_ONLY=0; break ;;
         2) SCRIPT_ONLY=1; break ;;
         0) echo "${C_DIM}已取消${C_RESET}"; exit 0 ;;
-        *) echo "无效选项" ;;
+        *) echo "${C_RED}无效选项${C_RESET}" ;;
       esac
     done
   fi
 
   if [[ "$SCRIPT_ONLY" -eq 0 ]]; then
-    port_input="$(ask_tty "${C_BOLD}请输入程序监听端口${C_RESET}\n${C_DIM}直接回车使用默认端口 8555${C_RESET}" "8555")"
-    if [[ ! "$port_input" =~ ^[0-9]+$ ]] || (( port_input < 1 || port_input > 65535 )); then
-      echo "${C_RED}错误：监听端口无效：$port_input${C_RESET}" >&2
-      exit 1
+    if [[ -f "$INSTALL_DIR/config.yaml" ]]; then
+      LISTEN="$(awk '/^listen:[[:space:]]*/{sub(/^listen:[[:space:]]*/, ""); print; exit}' "$INSTALL_DIR/config.yaml")"
+      LISTEN="${LISTEN:-0.0.0.0:8555}"
+    else
+      port_input="$(ask_tty "${C_BOLD}请输入程序监听端口${C_RESET}\n${C_DIM}直接回车使用默认端口 8555${C_RESET}" "8555")"
+      if [[ ! "$port_input" =~ ^[0-9]+$ ]] || (( port_input < 1 || port_input > 65535 )); then
+        echo "${C_RED}错误：监听端口无效：$port_input${C_RESET}" >&2
+        exit 1
+      fi
+      LISTEN="0.0.0.0:${port_input}"
     fi
-    LISTEN="0.0.0.0:${port_input}"
 
     proxy_input="$(ask_tty "${C_BOLD}请输入 GitHub 加速站地址${C_RESET}\n${C_DIM}不需要加速请直接回车${C_RESET}" "")"
     [[ -n "$proxy_input" ]] && GITHUB_PROXY="$proxy_input"
