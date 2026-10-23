@@ -52,7 +52,7 @@ Default address:
 http://0.0.0.0:8555
 ```
 
-On first launch Sakuio creates `config.yaml` next to the executable with a default listen address. The setup wizard then stores the selected database connection there. A SQLite file is only created when SQLite is selected as the main or metric database.
+On first launch Sakuio creates `config.yaml` in the service working directory (`/opt/sakuio` after installation) with the default listen address. The setup wizard then stores the selected database connection there. A SQLite file is only created when SQLite is selected as the main or metric database.
 
 ### One-line install
 
@@ -60,15 +60,19 @@ On first launch Sakuio creates `config.yaml` next to the executable with a defau
 curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/scripts/install.sh | sudo bash
 ```
 
-The installer asks for:
+The installer is now under `scripts/install.sh` and asks for:
 
-- listen port (default `8555`)
-- install directory (default `/opt/sakuio`)
-- optional GitHub proxy URL
+1. install directory (default `/opt/sakuio`)
+2. if an installation already exists:
+   - `1` update program and management script
+   - `2` update only the management script
+   - `0` cancel
+3. listen port (default `8555`) when doing a full install/update
+4. optional GitHub proxy URL
 
-The installer also downloads and unpacks the default theme into `/opt/sakuio/data/theme/SakuioTheme`, and the first setup activates it.
+It also downloads and unpacks the default theme into `/opt/sakuio/data/theme/SakuioTheme`; the first setup activates it.
 
-Then `sudo sakuio` opens a menu for start/stop/restart, logs, updates, username, password, and TOTP reset.
+The generated `sudo sakuio` menu supports start/stop/restart, logs, updates, username, password, and TOTP reset. Actions wait for Enter before returning to the menu, and `Ctrl-C` in live logs returns to the menu.
 
 ### Environment overrides
 

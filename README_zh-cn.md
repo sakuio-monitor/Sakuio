@@ -52,7 +52,7 @@ cargo build --release -p sakuio-server
 http://0.0.0.0:8555
 ```
 
-首次启动会在可执行文件同目录生成 `config.yaml`，写入默认监听地址；完成安装后，数据库连接信息也写入这个文件。只有选择 SQLite 作为主库或指标库时才会生成 SQLite 文件。
+首次启动会在服务工作目录中生成 `config.yaml`（安装后为 `/opt/sakuio`），写入默认监听地址；完成安装后，数据库连接信息也写入这个文件。只有选择 SQLite 作为主库或指标库时才会生成 SQLite 文件。
 
 ### 一键安装
 
@@ -60,15 +60,19 @@ http://0.0.0.0:8555
 curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/scripts/install.sh | sudo bash
 ```
 
-安装脚本会依次询问：
+安装脚本位于 `scripts/install.sh`，会依次询问：
 
-- 监听端口，默认 `8555`
-- 安装目录，默认 `/opt/sakuio`
-- GitHub 加速站 URL，可留空
+1. 安装目录，默认 `/opt/sakuio`
+2. 如果检测到已安装：
+   - `1` 更新程序和管理脚本
+   - `2` 只更新管理脚本
+   - `0` 取消
+3. 完整安装或更新时询问监听端口，默认 `8555`
+4. GitHub 加速站 URL，可留空
 
 安装脚本还会下载并解压默认主题到 `/opt/sakuio/data/theme/SakuioTheme`，首次初始化后自动启用该主题。
 
-然后 `sudo sakuio` 会打开数字菜单，可启动、停止、重启、查看日志、更新程序、修改用户名、修改密码、关闭 TOTP。
+`sudo sakuio` 数字菜单支持启动、停止、重启、查看日志、更新程序、修改用户名、修改密码、关闭 TOTP。操作完成后按 Enter 返回菜单；实时日志按 `Ctrl-C` 返回菜单。
 
 ### 环境变量覆盖
 
