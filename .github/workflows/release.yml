@@ -29,7 +29,7 @@ jobs:
           bun-version: latest
       - name: Install frontend dependencies
         working-directory: frontend
-        run: bun install --frozen-lockfile
+        run: bun install
       - name: Build admin SPA
         working-directory: frontend/apps/admin
         run: bunx vite build
