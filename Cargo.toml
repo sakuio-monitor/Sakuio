@@ -28,6 +28,8 @@ chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
+percent-encoding = "2"
 sqlx-core = "0.8.6"
 sqlx = { version = "0.8", features = ["runtime-tokio", "any", "sqlite", "postgres", "mysql", "chrono", "uuid", "derive"] }
 mime_guess = "2"

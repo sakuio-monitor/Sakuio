@@ -491,42 +491,17 @@ pub async fn run_main_switch(
         current_metric_store
     };
 
-    // The next process reads the locator from the bootstrap database, not from
-    // the target, so it must be updated before the restart.
-    // 下一个进程从 bootstrap 库读取定位信息（而不是目标库），因此重启前必须更新它。
-    let bootstrap = sakuio_db::open_bootstrap_db()
-        .await
-        .map_err(|e| format!("open bootstrap database: {e}"))?;
-    let locator = sakuio_db::SettingsRepository::new(bootstrap.pool());
-    locator
-        .set_json("app_db_driver", &driver.to_string())
-        .await
-        .map_err(|e| format!("save bootstrap app_db_driver: {e}"))?;
-    locator
-        .set_json("app_db_dsn", &target.dsn().to_string())
-        .await
-        .map_err(|e| format!("save bootstrap app_db_dsn: {e}"))?;
-
+    // Flush pending in-memory buckets before switching the startup config.
     tasks.phase("flushing metrics");
-    if let Err(e) = writer.flush_to_store(flush_store).await {
-        // Keep the old database active: undo the locator so a later restart
-        // does not open a target that is missing the pending buckets.
-        // 保持旧库可用：回滚定位信息，避免之后重启打开缺少待落盘桶的目标库。
-        let source_driver = match source.kind() {
-            DbKind::MySql => "mysql",
-            DbKind::Postgres => "postgresql",
-            DbKind::Sqlite => "sqlite",
-        };
-        let _ = locator
-            .set_json("app_db_driver", &source_driver.to_string())
-            .await;
-        let _ = locator
-            .set_json("app_db_dsn", &source.dsn().to_string())
-            .await;
-        bootstrap.shutdown().await;
-        return Err(format!("flush in-memory metric buckets: {e}"));
-    }
-    bootstrap.shutdown().await;
+    writer
+        .flush_to_store(flush_store)
+        .await
+        .map_err(|e| format!("flush in-memory metric buckets: {e}"))?;
+
+    // The next process resolves the main database from config.yaml. Write it
+    // only after the copy, verification, and pending-bucket flush succeeded.
+    crate::config::update_database(target.dsn(), source.max_connections())
+        .map_err(|e| format!("save config.yaml: {e}"))?;
 
     tasks.phase("restarting");
     target.shutdown().await;

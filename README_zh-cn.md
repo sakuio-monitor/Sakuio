@@ -49,17 +49,39 @@ cargo build --release -p sakuio-server
 默认监听：
 
 ```text
-http://0.0.0.0:8080
+http://0.0.0.0:8555
 ```
 
-首次启动会进入安装向导，完成数据库与管理员账号初始化。
+首次启动会在可执行文件同目录生成 `config.yaml`，写入默认监听地址；完成安装后，数据库连接信息也写入这个文件。只有选择 SQLite 作为主库或指标库时才会生成 SQLite 文件。
 
-常用环境变量：
+### 一键安装
 
 ```bash
-SAKUIO_LISTEN=0.0.0.0:8080
+curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.sh \
+  | sudo bash -s -- --listen 0.0.0.0:8555
+sudo sakuio
+```
+
+`sudo sakuio` 会打开数字菜单，可启动、停止、重启、查看日志、更新程序、修改用户名、修改密码、关闭 TOTP。
+
+### 环境变量覆盖
+
+```bash
+SAKUIO_LISTEN=0.0.0.0:8555
 SAKUIO_DATABASE_DSN=./data/sakuio.db
 ```
+
+环境变量优先于 `config.yaml`。完整示例见 [`config.example.yaml`](config.example.yaml)。
+
+只有同时满足以下三个条件，程序才不会进入初始化状态：
+
+1. `config.yaml` 存在
+2. 配置的主库可以连接
+3. 主库中存在 `initialized = true`
+
+`metric_database.mode: same` 表示指标表与主库共用同一个数据库，不是没有指标库。使用独立指标库时写 `mode: separate`，并在同一层级填写连接字段。数据库连接字段在 `config.yaml` 中拆开声明：`driver`、`host`、`port`、`database`、`user`、`password`、`path`。
+
+配置的主库连接失败时，程序会进入初始化状态，允许重新配置数据库。
 
 ### 添加节点
 
@@ -67,7 +89,7 @@ SAKUIO_DATABASE_DSN=./data/sakuio.db
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio-agent/main/install.sh | bash -s -- \
-  --endpoint ws://<中控地址>:8080 \
+  --endpoint ws://<中控地址>:8555 \
   --token "<节点 Token>"
 ```
 

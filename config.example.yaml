@@ -1,0 +1,55 @@
+# Sakuio server configuration.
+#
+# Copy to config.yaml next to the executable, or keep config.yaml in the
+# working directory when running with `cargo run`.
+#
+# Sakuio only leaves setup mode when:
+#   1. this file exists,
+#   2. the configured main database is reachable,
+#   3. the main database contains initialized = true.
+
+listen: 0.0.0.0:8555
+
+# ---- Main database ---------------------------------------------------------
+# SQLite example:
+database:
+  driver: sqlite
+  path: ./data/sakuio.db
+  max_connections: 16
+
+# PostgreSQL example:
+# database:
+#   driver: postgres
+#   host: 127.0.0.1
+#   port: 5432
+#   database: sakuio
+#   user: sakuio
+#   password: change-me
+#   max_connections: 16
+
+# MySQL / MariaDB example:
+# database:
+#   driver: mysql
+#   host: 127.0.0.1
+#   port: 3306
+#   database: sakuio
+#   user: sakuio
+#   password: change-me
+#   max_connections: 16
+
+# ---- Metric database -------------------------------------------------------
+# Metrics are always explicitly declared.
+# same = metric tables live in the main database (metric_ prefix).
+metric_database:
+  mode: same
+
+# Separate metric database example:
+# metric_database:
+#   mode: separate
+#   driver: postgres
+#   host: 127.0.0.1
+#   port: 5432
+#   database: sakuio_metrics
+#   user: sakuio
+#   password: change-me
+#   max_connections: 25

@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux uses static musl, same strategy as Sakuio-agent.
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, asset: sakuio-server-linux-amd64, zig: true }
+          - { os: ubuntu-24.04, target: aarch64-unknown-linux-musl, asset: sakuio-server-linux-arm64, zig: true }
+          - { os: macos-14, target: aarch64-apple-darwin, asset: sakuio-server-darwin-arm64, zig: false }
+          - { os: macos-13, target: x86_64-apple-darwin, asset: sakuio-server-darwin-amd64, zig: false }
+          - { os: windows-2022, target: x86_64-pc-windows-msvc, asset: sakuio-server-windows-amd64.exe, zig: false }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Zig
+        if: matrix.zig
+        shell: bash
+        run: |
+          curl -fsSL --retry 3 -o /tmp/zig.tar.xz \
+            https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+          mkdir -p "$HOME/.zig"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/.zig" --strip-components=1
+          echo "$HOME/.zig" >> "$GITHUB_PATH"
+
+      - name: Install cargo-zigbuild
+        if: matrix.zig
+        uses: taiki-e/install-action@cargo-zigbuild
+
+      - name: Build (static musl)
+        if: matrix.zig
+        shell: bash
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: cargo zigbuild --release --target ${{ matrix.target }} -p sakuio-server
+
+      - name: Verify static binary
+        if: matrix.zig
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/sakuio-server"
+          file "$BIN"
+          if file "$BIN" | grep -qi "dynamically linked"; then
+            echo "::error::expected static musl binary"
+            exit 1
+          fi
+
+      - name: Build (native)
+        if: ${{ !matrix.zig }}
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} -p sakuio-server
+
+      - name: Collect asset
+        shell: bash
+        run: |
+          EXE=""
+          if [[ "${{ matrix.target }}" == *windows* ]]; then EXE=".exe"; fi
+          cp "target/${{ matrix.target }}/release/sakuio-server$EXE" "${{ matrix.asset }}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
+          if-no-files-found: error
+
+  build-freebsd:
+    name: sakuio-server-freebsd-amd64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y rust
+          run: |
+            cargo build --release -p sakuio-server
+            cp target/release/sakuio-server sakuio-server-freebsd-amd64
+            sha256 sakuio-server-freebsd-amd64 > sakuio-server-freebsd-amd64.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sakuio-server-freebsd-amd64
+          path: |
+            sakuio-server-freebsd-amd64
+            sakuio-server-freebsd-amd64.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [build, build-freebsd]
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Add installer
+        run: cp install.sh dist/install.sh
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

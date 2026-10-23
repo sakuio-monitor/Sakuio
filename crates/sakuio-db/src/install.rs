@@ -130,6 +130,7 @@ pub async fn complete_install(
     settings
         .set_json("installation_state", &"completed")
         .await?;
+    settings.set_json("initialized", &true).await?;
     settings.set_json("app_db_driver", &driver).await?;
     settings.set_json("app_db_dsn", &dsn).await?;
 

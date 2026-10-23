@@ -91,8 +91,35 @@ DDNS / 授权 API 的驱动注册、Cloudflare Token/Global Key 配置解析、A
 地址选择、错误路径和数据库辅助函数均有单元测试。真实 Cloudflare 网络不在
 CI 中访问。
 
-发布流程待迁移数据面稳定后接入（计划：tag `v*` 构建 linux-amd64/arm64
-产物 + 迁移校验）。改动推送前必须本地编译通过。
+### 发布与安装
+
+推送 `v*` tag 或手动运行 `.github/workflows/release.yml`：
+
+| 目标 | 资产名 |
+|---|---|
+| linux x86_64 | `sakuio-server-linux-amd64`（static musl） |
+| linux aarch64 | `sakuio-server-linux-arm64`（static musl） |
+| darwin x86_64 | `sakuio-server-darwin-amd64` |
+| darwin arm64 | `sakuio-server-darwin-arm64` |
+| windows x86_64 | `sakuio-server-windows-amd64.exe` |
+| freebsd x86_64 | `sakuio-server-freebsd-amd64` |
+
+每个资产同时发布 `.sha256`；安装脚本会校验（Release 提供时）。
+
+一键安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.sh \
+  | sudo bash -s -- --listen 0.0.0.0:8555
+sudo sakuio
+```
+
+安装脚本注册 systemd / launchd 服务和 `/usr/local/bin/sakuio` 管理命令。
+`sakuio` 提供启动、停止、重启、状态、实时日志、最近日志、更新、修改用户名、
+修改密码、关闭 TOTP，以及 GitHub 加速地址输入。
+
+运行时配置位于可执行文件同目录 `config.yaml`，权限 `0600`；只有选择 SQLite
+作为主库或指标库时才创建 SQLite 文件。改动推送前必须本地编译通过。
 
 ## 4. Sakuio-frontend（前端）
 

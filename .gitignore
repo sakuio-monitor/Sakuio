@@ -14,6 +14,10 @@
 *.sqlite
 *.sqlite3
 
+# ---- 运行时配置 ----
+config.yaml
+config.yaml.tmp.*
+
 # ---- 环境与密钥 ----
 .env
 .env.*

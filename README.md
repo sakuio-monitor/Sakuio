@@ -49,17 +49,39 @@ cargo build --release -p sakuio-server
 Default address:
 
 ```text
-http://0.0.0.0:8080
+http://0.0.0.0:8555
 ```
 
-The first launch opens the setup wizard for database and administrator initialization.
+On first launch Sakuio creates `config.yaml` next to the executable with a default listen address. The setup wizard then stores the selected database connection there. A SQLite file is only created when SQLite is selected as the main or metric database.
 
-Common environment variables:
+### One-line install
 
 ```bash
-SAKUIO_LISTEN=0.0.0.0:8080
+curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.sh \
+  | sudo bash -s -- --listen 0.0.0.0:8555
+sudo sakuio
+```
+
+`sudo sakuio` opens a menu for start/stop/restart, logs, updates, username, password, and TOTP reset.
+
+### Environment overrides
+
+```bash
+SAKUIO_LISTEN=0.0.0.0:8555
 SAKUIO_DATABASE_DSN=./data/sakuio.db
 ```
+
+Environment variables override `config.yaml`. See [`config.example.yaml`](config.example.yaml) for the full file.
+
+A fresh install is only considered complete when all of these are true:
+
+1. `config.yaml` exists
+2. the configured main database is reachable
+3. the database contains `initialized = true`
+
+`metric_database.mode: same` means metrics are stored in the main database. Use `mode: separate` plus a structured connection when using an independent metric database. Database connection fields are declared separately in `config.yaml` (`driver`, `host`, `port`, `database`, `user`, `password`, `path`).
+
+If the configured database cannot be reached, Sakuio starts in setup mode so the connection can be repaired.
 
 ### Add a node
 
@@ -67,7 +89,7 @@ Create a node in **Servers**, then run the generated installation command on the
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio-agent/main/install.sh | bash -s -- \
-  --endpoint ws://<sakuio-host>:8080 \
+  --endpoint ws://<sakuio-host>:8555 \
   --token "<node-token>"
 ```
 

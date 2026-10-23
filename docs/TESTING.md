@@ -49,8 +49,8 @@ cargo test -p sakuio-db --test backends -- --test-threads=1
 
 | 变量 | 说明 |
 |------|------|
-| `SAKUIO_DATABASE_DSN` | 覆盖主库 DSN（优先于安装时写入的 settings） |
-| `SAKUIO_LISTEN` | 监听地址，默认 `0.0.0.0:8080`（验收测试用它分配随机端口） |
+| `SAKUIO_DATABASE_DSN` | 临时覆盖 `config.yaml` 中的主库连接 |
+| `SAKUIO_LISTEN` | 监听地址，默认 `0.0.0.0:8555`（验收测试用它分配随机端口） |
 
 ## 注意
 

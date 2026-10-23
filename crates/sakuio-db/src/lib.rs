@@ -94,14 +94,21 @@ impl AppDatabase {
     ) -> DbResult<Self> {
         sqlx::any::install_default_drivers();
         let kind = DbKind::detect(dsn);
-        let effective = match kind {
-            DbKind::Sqlite if dsn.trim().is_empty() => "sqlite://data/sakuio.db?mode=rwc".into(),
-            DbKind::Sqlite if !dsn.contains("://") => {
-                format!("sqlite://{}?mode=rwc", dsn.trim_start_matches("./"))
+        let in_memory = dsn.trim() == "sqlite::memory:";
+        let effective = if in_memory {
+            // SQLx accepts `sqlite::memory:` directly; the generic SQLite URL
+            // normalizer below would otherwise rewrite it into an invalid URL.
+            "sqlite::memory:".to_string()
+        } else {
+            match kind {
+                DbKind::Sqlite if dsn.trim().is_empty() => "sqlite://data/sakuio.db?mode=rwc".into(),
+                DbKind::Sqlite if !dsn.contains("://") => {
+                    format!("sqlite://{}?mode=rwc", dsn.trim_start_matches("./"))
+                }
+                _ => dsn.to_string(),
             }
-            _ => dsn.to_string(),
         };
-        if kind == DbKind::Sqlite && create_dirs {
+        if kind == DbKind::Sqlite && create_dirs && !in_memory {
             let path = effective
                 .trim_start_matches("sqlite://")
                 .split('?')

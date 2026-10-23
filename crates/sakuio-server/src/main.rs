@@ -5,6 +5,8 @@ mod agent_version;
 mod audit_api;
 mod auth;
 mod billing_watcher;
+mod cli;
+mod config;
 mod dashboard;
 mod database_api;
 mod db_task;
@@ -247,42 +249,79 @@ async fn theme_serve(State(state): State<AppState>, request: Request) -> Respons
         .into_response()
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    logging::init();
-    site_settings::apply_staged_restore();
-    // 主库 DSN：环境变量优先，其次安装时写入的设置（默认本机 SQLite）。
-    // 主库 DSN：env 优先，其次安装设置；缺省本机 SQLite。
-    let app_db = if let Ok(dsn) = std::env::var("SAKUIO_DATABASE_DSN") {
+async fn open_app_database(config: &config::ServerConfig) -> anyhow::Result<sakuio_db::AppDatabase> {
+    if let Ok(dsn) = std::env::var("SAKUIO_DATABASE_DSN") {
         let max = std::env::var("SAKUIO_DB_MAX_CONNECTIONS")
             .ok()
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(16);
-        sakuio_db::AppDatabase::connect_with_max(&dsn, true, max).await?
-    } else {
+        return Ok(sakuio_db::AppDatabase::connect_with_max(&dsn, true, max).await?);
+    }
+    if config.database.is_configured() {
+        return Ok(
+            sakuio_db::AppDatabase::connect_with_max(
+                &config.database.dsn(),
+                true,
+                config.database.max_connections,
+            )
+            .await?,
+        );
+    }
+    // The setup wizard needs a working in-memory database before the user has
+    // chosen where the real database should live. Using a single connection is
+    // required because `sqlite::memory:` is connection-local.
+    Ok(sakuio_db::AppDatabase::connect_with_max("sqlite::memory:", true, 1).await?)
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut args = std::env::args().skip(1);
+    if let Some(first) = args.next() {
+        if first == "admin" {
+            let rest: Vec<String> = args.collect();
+            return cli::run(&rest).await;
+        }
+        if first == "--version" || first == "version" {
+            println!("sakuio-server {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        anyhow::bail!("unknown command: {first}");
+    }
+
+    logging::init();
+    site_settings::apply_staged_restore();
+    let mut config = config::ServerConfig::load_or_create()?;
+
+    // Legacy installations kept their locator in ./data/sakuio.db. Import it
+    // once, then the YAML file becomes the single source of truth.
+    if !config.database.is_configured()
+        && std::env::var_os("SAKUIO_DATABASE_DSN").is_none()
+        && std::path::Path::new("./data/sakuio.db").exists()
+    {
         let boot = open_bootstrap_db().await?;
         let settings = sakuio_db::SettingsRepository::new(boot.pool());
-        let dsn: Option<String> = settings.get_json("app_db_dsn").await?;
         let max = settings
             .get_json::<u32>("app_db_max_connections")
             .await?
-            .unwrap_or(16)
-            .clamp(1, 64);
-        match dsn.filter(|dsn| !dsn.trim().is_empty()) {
-            Some(dsn) => {
-                // Any configured DSN wins, including a non-default SQLite path.
-                // 只要配置了 DSN 就使用它（包括非默认的 SQLite 路径）。
-                boot.shutdown().await;
-                sakuio_db::AppDatabase::connect_with_max(&dsn, true, max).await?
-            }
-            None if max != 16 => {
-                let dsn = boot.pool().dsn().to_string();
-                boot.shutdown().await;
-                sakuio_db::AppDatabase::connect_with_max(&dsn, true, max).await?
-            }
-            None => boot,
+            .unwrap_or(16);
+        if let Some(dsn) = settings.get_json::<String>("app_db_dsn").await? {
+            config.set_database(&dsn, max);
+        } else {
+            // Older installs used the bootstrap SQLite as the main database.
+            config.set_database(boot.dsn(), max);
+        }
+        config.save()?;
+        boot.shutdown().await;
+    }
+
+    let app_db = match open_app_database(&config).await {
+        Ok(db) => db,
+        Err(error) => {
+            tracing::error!(error = %error, "configured database unavailable; entering setup state");
+            sakuio_db::AppDatabase::connect_with_max("sqlite::memory:", true, 1).await?
         }
     };
+    let listen_setting = config.listen.clone();
     let pool = app_db.pool().clone();
     let geo = Arc::new(geoip_resolver::GeoEngine::new(pool.clone()));
     let audit = audit::AuditLogger::start(pool.clone(), geo.clone());
@@ -290,7 +329,16 @@ async fn main() -> anyhow::Result<()> {
     let install_gate = Arc::new(RwLock::new(install_status.required));
 
     // 指标库：DSN 留空 = 与主库合并；独立 DSN 时单独连接。
-    let metric_cfg = sakuio_metric::MetricDbConfig::load(&pool).await?;
+    let mut metric_cfg = sakuio_metric::MetricDbConfig::load(&pool).await?;
+    if !config.metric_database.is_same() {
+        metric_cfg.dsn = config.metric_database.dsn();
+        metric_cfg.max_connections = config.metric_database.max_connections();
+        metric_cfg.save(&pool).await?;
+    }
+    else if !metric_cfg.dsn.trim().is_empty() {
+        config.set_metric_database(&metric_cfg.dsn, metric_cfg.max_connections);
+        config.save()?;
+    }
     let metric_store = Arc::new(sakuio_metric::MetricStore::connect(&pool, &metric_cfg).await?);
     let (metric_writer, metric_handle) = MetricWriter::start(
         pool.clone(),
@@ -569,18 +617,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/agent/relay/:relay_id", get(remote::agent_relay_ws))
         .route(WS_LINK_PATH, get(api::agent_link))
         .route("/api/install/status", get(api::install_status))
+        .route("/api/install/database", post(api::install_database))
         .route("/api/install/complete", post(api::install_complete))
         .route("/api/install/test-db", post(api::install_test_db))
         .fallback(theme_serve)
         .layer(TraceLayer::new_for_http())
         .with_state(app_state);
 
-    let addr: SocketAddr = match std::env::var("SAKUIO_LISTEN") {
-        Ok(value) => value
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid SAKUIO_LISTEN {value:?}: {e}"))?,
-        Err(_) => "0.0.0.0:8080".parse().unwrap(),
-    };
+    let listen_value = std::env::var("SAKUIO_LISTEN")
+        .ok()
+        .unwrap_or(listen_setting);
+    let addr: SocketAddr = listen_value
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid listen address {listen_value:?}: {e}"))?;
     tracing::info!(%addr, path = WS_LINK_PATH, "sakuio-server listening");
     // 自愈重启（主库切换）时子进程可能与旧进程短暂争抢端口，重试几次。
     let listener = 'bind: {

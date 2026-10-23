@@ -15,8 +15,16 @@ use std::net::SocketAddr;
 /// GET `/api/install/status`。
 pub async fn install_status(State(state): State<AppState>) -> impl IntoResponse {
     let service = InstallService::new(&state.db);
+    let configured = crate::config::ServerConfig::load_or_create()
+        .ok()
+        .is_some_and(|config| config.database.is_configured() && config.database.dsn() == state.db.dsn());
     match service.status().await {
-        Ok(status) => Json(status).into_response(),
+        Ok(status) => Json(serde_json::json!({
+            "state": status.state,
+            "required": status.required,
+            "database_configured": configured,
+        }))
+        .into_response(),
         Err(e) => {
             tracing::error!(error = %e, "install status query failed");
             (
@@ -57,6 +65,61 @@ pub async fn install_test_db(
     }
 }
 
+/// POST `/api/install/database` — validate and persist the database before the
+/// administrator/site steps. The process restarts so the next wizard steps run
+/// against the real database, not the in-memory setup runtime.
+pub async fn install_database(
+    State(state): State<AppState>,
+    Json(body): Json<TestDbRequest>,
+) -> Response {
+    {
+        let gate = state.install_gate.read().await;
+        if !*gate {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "message": "install not active" })),
+            )
+                .into_response();
+        }
+    }
+    let dsn = body.app_db_dsn.trim();
+    if dsn.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "message": "database DSN is required" })),
+        )
+            .into_response();
+    }
+    let target = match AppDatabase::connect(dsn, true).await {
+        Ok(target) => target,
+        Err(e) => {
+            tracing::warn!(error = %e, "install database connection failed");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "message": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = crate::config::update_database(target.dsn(), 16) {
+        target.shutdown().await;
+        tracing::error!(error = %e, "write install database config failed");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "message": format!("save config.yaml failed: {e}") })),
+        )
+            .into_response();
+    }
+    target.shutdown().await;
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        if !crate::db_task::spawn_restart() {
+            tracing::error!("database configured, but auto-restart failed; restart manually");
+        }
+    });
+    Json(serde_json::json!({ "ok": true, "restart": true })).into_response()
+}
+
 /// POST `/api/install/complete`.
 /// POST `/api/install/complete`。
 pub async fn install_complete(
@@ -75,11 +138,16 @@ pub async fn install_complete(
                 .into_response();
         }
     }
-    let dsn = body
-        .app_db_dsn
-        .clone()
-        .filter(|dsn| !dsn.trim().is_empty())
-        .unwrap_or_else(|| "./data/sakuio.db".into());
+    let configured = crate::config::ServerConfig::load_or_create()
+        .ok()
+        .is_some_and(|config| config.database.is_configured() && config.database.dsn() == state.db.dsn());
+    if !configured {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "message": "configure the database first" })),
+        )
+            .into_response();
+    }
     let site_name = body.sitename.clone();
     let site_description = body.description.clone();
     let audit_username = body.username.clone();
@@ -96,41 +164,15 @@ pub async fn install_complete(
         .take(512)
         .collect::<String>();
 
-    // Install directly into the selected database; the bootstrap SQLite only
-    // keeps the locator used at startup.
-    // 直接写入所选数据库；bootstrap SQLite 只保留启动所需的定位信息。
-    let target = match AppDatabase::connect(&dsn, true).await {
-        Ok(db) => db,
-        Err(e) => {
-            tracing::warn!(error = %e, "install target database unavailable");
-            crate::audit::record_auth_event_to(
-                &state.geo,
-                &state.db,
-                &audit_username,
-                "",
-                "INSTALL_FAILED",
-                &audit_username,
-                "target database unavailable",
-                &audit_ip,
-                &audit_agent,
-                400,
-                "POST",
-                "/api/install/complete",
-            )
-            .await;
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "message": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
-    match complete_install(target.pool(), &state.db, body).await {
+    // The database was configured and the process restarted in the previous
+    // step; write the remaining site/admin data directly into the live DB.
+    let target = &state.db;
+    match complete_install(target, target, body).await {
         Ok(outcome) => {
             // Persist the site name/description into the selected database so
             // theme HTML injection and settings survive the install restart.
             // 把站点名称/描述写入所选数据库，保证主题注入与重启后设置一致。
-            let mut settings = crate::site_settings::load_from_pool(target.pool()).await;
+            let mut settings = crate::site_settings::load_from_pool(target).await;
             if let Some(name) = site_name
                 .as_deref()
                 .map(str::trim)
@@ -141,12 +183,12 @@ pub async fn install_complete(
             if let Some(description) = site_description {
                 settings.site_description = description;
             }
-            if let Err(e) = crate::site_settings::save_to_pool(target.pool(), &settings).await {
+            if let Err(e) = crate::site_settings::save_to_pool(target, &settings).await {
                 tracing::warn!(error = %e, "save initial site settings failed");
             }
             crate::audit::record_auth_event_to(
                 &state.geo,
-                target.pool(),
+                target,
                 &audit_username,
                 "",
                 "INSTALL",

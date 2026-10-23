@@ -195,6 +195,60 @@ pub async fn update_database(
             }
         }
     }
+    // Copy and verify metric buckets before committing the new configuration.
+    // This keeps the previous database active on any failure.
+    if let Some(new_store) = &new_store {
+        if dsn_changed || prefix_changed {
+            let has_data =
+                table_exists(old_store.pool(), &format!("{}buckets", old_store.prefix())).await;
+            if has_data {
+                tasks.phase("copying metrics");
+                if let Err(e) = sakuio_metric::run_bucket_sync(
+                    old_store.as_ref(),
+                    new_store.as_ref(),
+                    |n, p| {
+                        tasks.processed(n);
+                        tasks.phase(p);
+                    },
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "metric bucket migration failed");
+                    tasks.finish(Some(e.to_string()));
+                    return Err((StatusCode::INTERNAL_SERVER_ERROR, "metric migration failed"));
+                }
+                tasks.phase("verifying metrics");
+                let old_table = format!("{}buckets", old_store.prefix());
+                let new_table = format!("{}buckets", new_store.prefix());
+                let old_count: Result<i64, _> = sqlx::query_scalar(&format!(
+                    "SELECT COUNT(*) FROM {old_table}"
+                ))
+                .fetch_one(old_store.pool())
+                .await;
+                let new_count: Result<i64, _> = sqlx::query_scalar(&format!(
+                    "SELECT COUNT(*) FROM {new_table}"
+                ))
+                .fetch_one(new_store.pool())
+                .await;
+                match (old_count, new_count) {
+                    (Ok(old), Ok(new)) if new >= old => {}
+                    (Ok(old), Ok(new)) => {
+                        tasks.finish(Some("metric bucket verification failed".into()));
+                        tracing::warn!(old, new, "metric bucket count mismatch");
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "metric bucket verification failed",
+                        ));
+                    }
+                    (Err(e), _) | (_, Err(e)) => {
+                        tasks.finish(Some(e.to_string()));
+                        return Err((StatusCode::INTERNAL_SERVER_ERROR, "verify metrics failed"));
+                    }
+                }
+            }
+        }
+    }
+
     if let Err(e) = cfg.save(&state.db).await {
         tracing::warn!(error = %e, "save metric db config failed");
         if reconnect {
@@ -202,43 +256,23 @@ pub async fn update_database(
         }
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "save config failed"));
     }
+    if let Err(e) = crate::config::update_metric_database(&cfg.dsn, cfg.max_connections) {
+        tracing::warn!(error = %e, "save metric database into config.yaml failed");
+        if reconnect {
+            tasks.finish(Some(e.to_string()));
+        }
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "save config.yaml failed"));
+    }
 
     if let Some(new_store) = new_store {
         state.metric.handle.swap_store((*new_store).clone()).await;
         state.metric.handle.reload_policy(new_store.as_ref()).await;
-        let tasks = tasks.clone();
-        let sync_needed = dsn_changed || prefix_changed;
-        tokio::spawn(async move {
-            if sync_needed {
-                // 旧库存在桶表时后台全量同步；重复行由写入端去重。
-                let has_data =
-                    table_exists(old_store.pool(), &format!("{}buckets", old_store.prefix())).await;
-                let result = if has_data {
-                    sakuio_metric::run_bucket_sync(
-                        old_store.as_ref(),
-                        new_store.as_ref(),
-                        |n, p| {
-                            tasks.processed(n);
-                            tasks.phase(p);
-                        },
-                    )
-                    .await
-                } else {
-                    Ok(())
-                };
-                match result {
-                    Ok(()) => tasks.finish(None),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "metric store background sync failed");
-                        tasks.finish(Some(e));
-                    }
-                }
-            } else {
-                tasks.finish(None);
-            }
-            old_store.shutdown().await;
-        });
+        old_store.shutdown().await;
+        if reconnect {
+            tasks.finish(None);
+        }
     }
+
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
@@ -285,18 +319,12 @@ pub async fn update_main_database(
     if let Some(max) = body.max_connections {
         let max = max.clamp(1, 64);
         let current_max = state.db.max_connections();
-        let boot = sakuio_db::open_bootstrap_db().await.map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "open bootstrap database failed",
-            )
-        })?;
-        let settings = sakuio_db::SettingsRepository::new(boot.pool());
-        settings
-            .set_json("app_db_max_connections", &max)
-            .await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "save pool limit failed"))?;
-        boot.shutdown().await;
+        let mut config = crate::config::ServerConfig::load_or_create()
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "load config failed"))?;
+        config.database.max_connections = max;
+        config
+            .save()
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "save config failed"))?;
         if dsn == state.db.dsn()
             || sakuio_db::normalize_dsn(dsn) == sakuio_db::normalize_dsn(state.db.dsn())
         {

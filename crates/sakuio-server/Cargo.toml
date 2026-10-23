@@ -40,6 +40,7 @@ sakuio-transport-ws.workspace = true
 sakuio-notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 sysinfo = "0.33.1"
 inventory = "=0.3.19"
 sqlx.workspace = true

@@ -26,11 +26,22 @@ impl<'a> SettingsRepository<'a> {
             "SELECT value FROM system_settings WHERE {} = ? LIMIT 1",
             self.key_column()
         );
-        let row: Option<(String,)> = sqlx::query_as(&sql)
+        // New installs have an explicit initialized flag. The second query is
+        // compatibility for databases created before that flag existed; only
+        // `completed` counts as initialized (not `ready`).
+        let initialized: Option<(String,)> = sqlx::query_as(&sql)
+            .bind("initialized")
+            .fetch_optional(self.pool)
+            .await?;
+        if let Some((value,)) = initialized {
+            let value = value.trim().trim_matches('"');
+            return Ok(matches!(value, "true" | "1"));
+        }
+        let legacy: Option<(String,)> = sqlx::query_as(&sql)
             .bind("installation_state")
             .fetch_optional(self.pool)
             .await?;
-        Ok(row.is_some_and(|(v,)| v.contains("ready") || v.contains("completed")))
+        Ok(legacy.is_some_and(|(v,)| v.trim().trim_matches('"') == "completed"))
     }
 
     /// Sets a JSON-serializable setting value (portable upsert).
