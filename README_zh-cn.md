@@ -58,7 +58,6 @@ http://0.0.0.0:8555
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.sh | sudo bash
-sudo sakuio
 ```
 
 安装脚本会依次询问：

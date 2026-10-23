@@ -58,7 +58,6 @@ On first launch Sakuio creates `config.yaml` next to the executable with a defau
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.sh | sudo bash
-sudo sakuio
 ```
 
 The installer asks for:

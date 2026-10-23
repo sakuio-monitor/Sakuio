@@ -110,7 +110,6 @@ CI 中访问。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.sh | sudo bash
-sudo sakuio
 ```
 
 安装脚本注册 systemd / launchd 服务和 `/usr/local/bin/sakuio` 管理命令。
