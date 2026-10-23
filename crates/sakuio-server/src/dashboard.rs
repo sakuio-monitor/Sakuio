@@ -525,7 +525,6 @@ impl DashboardService {
             let uuid: String = row.try_get("node_uuid").unwrap_or_default();
             let key: String = row.try_get("metric_key").unwrap_or_default();
             let wsum: f64 = row.try_get("wsum").unwrap_or(0.0);
-            let sum_val: f64 = row.try_get("sum_val").unwrap_or(0.0);
             let samples: i64 = row.try_get("samples").unwrap_or(0);
             let max: f64 = row.try_get("max_val").unwrap_or(0.0);
             let peak_at = peak_times
@@ -554,8 +553,10 @@ impl DashboardService {
                     entry.disk_sum += wsum;
                     entry.disk_count += samples;
                 }
-                "traffic.up" => entry.traffic_up += sum_val,
-                "traffic.down" => entry.traffic_down += sum_val,
+                // Traffic metrics are per-sample deltas: avg_val is the
+                // average delta, so multiply by sample_count for the total.
+                "traffic.up" => entry.traffic_up += wsum,
+                "traffic.down" => entry.traffic_down += wsum,
                 "net.in.rate" | "net.out.rate" => {
                     if max >= entry.peak_rate {
                         entry.peak_rate = max;
@@ -603,11 +604,11 @@ impl DashboardService {
                 .unwrap_or(0.0);
             cumulative_up += values
                 .get("traffic.up")
-                .map(|(_, s, _, _)| *s)
+                .map(|(w, _, _, _)| *w)
                 .unwrap_or(0.0);
             cumulative_down += values
                 .get("traffic.down")
-                .map(|(_, s, _, _)| *s)
+                .map(|(w, _, _, _)| *w)
                 .unwrap_or(0.0);
             let up_cum = cumulative_up;
             let down_cum = cumulative_down;
