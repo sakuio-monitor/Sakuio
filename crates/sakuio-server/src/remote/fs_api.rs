@@ -44,6 +44,10 @@ pub fn fs_routes() -> Router<AppState> {
             post(fs_move),
         )
         .route(
+            "/api/admin/nodes/:uuid/fs/copy",
+            post(fs_copy),
+        )
+        .route(
             "/api/admin/nodes/:uuid/fs/text",
             get(fs_read_text).put(fs_write_text),
         )
@@ -51,6 +55,7 @@ pub fn fs_routes() -> Router<AppState> {
         .route("/api/admin/nodes/:uuid/fs/search", get(fs_search))
         .route("/api/admin/nodes/:uuid/fs/rename", post(fs_rename))
         .route("/api/admin/nodes/:uuid/fs/chmod", post(fs_chmod))
+        .route("/api/admin/nodes/:uuid/fs/chown", post(fs_chown))
         .route("/api/admin/nodes/:uuid/fs/trash", get(fs_trash_list))
         .route("/api/admin/nodes/:uuid/fs/trash/restore", post(fs_trash_restore))
         .route("/api/admin/nodes/:uuid/fs/trash/empty", post(fs_trash_empty))
@@ -81,6 +86,15 @@ struct SearchQuery {
 struct ChmodBody {
     path: String,
     mode: String,
+}
+
+#[derive(Deserialize)]
+struct ChownBody {
+    path: String,
+    #[serde(default)]
+    owner: String,
+    #[serde(default)]
+    group: String,
 }
 
 #[derive(Deserialize)]
@@ -177,6 +191,21 @@ async fn fs_move(
     .await
 }
 
+async fn fs_copy(
+    _user: AdminUser,
+    State(state): State<AppState>,
+    Path(uuid): Path<String>,
+    Json(body): Json<MoveBody>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    call(
+        &state,
+        &uuid,
+        "copy",
+        json!({ "from": body.from, "to": body.to }),
+    )
+    .await
+}
+
 async fn fs_read_text(
     _user: AdminUser,
     State(state): State<AppState>,
@@ -243,6 +272,21 @@ async fn fs_chmod(
         &uuid,
         "chmod",
         json!({ "path": body.path, "mode": body.mode }),
+    )
+    .await
+}
+
+async fn fs_chown(
+    _user: AdminUser,
+    State(state): State<AppState>,
+    Path(uuid): Path<String>,
+    Json(body): Json<ChownBody>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    call(
+        &state,
+        &uuid,
+        "chown",
+        json!({ "path": body.path, "owner": body.owner, "group": body.group }),
     )
     .await
 }
