@@ -119,6 +119,27 @@ async fn metric_store_works_on_every_backend() {
             .list_buckets_for_metric(&node, "cpu.usage", 60, start, start + 60_000, 100)
             .await
             .unwrap_or_else(|e| panic!("{} filtered bucket list failed: {e}", backend.name));
+        let second = unique("metric-node-2-");
+        store
+            .insert_buckets(&[
+                bucket(&second, "cpu.usage", 60, start, 30.0),
+                bucket(&second, "memory.used", 60, start, 2048.0),
+            ])
+            .await
+            .unwrap();
+        let many = store
+            .list_buckets_multi(
+                &[node.clone(), second.clone()],
+                None,
+                60,
+                start,
+                start + 60_000,
+                100,
+            )
+            .await
+            .unwrap();
+        assert_eq!(many.len(), 2, "{} multi-node groups", backend.name);
+        assert_eq!(many[&second].len(), 2, "{} multi-node rows", backend.name);
         assert_eq!(cpu_only.len(), 1, "{} filtered bucket rows", backend.name);
         assert_eq!(cpu_only[0].metric_key, "cpu.usage");
 

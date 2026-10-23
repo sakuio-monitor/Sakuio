@@ -78,6 +78,34 @@ pub async fn public_get_client_recent_records(
     Ok(Value::Array(reports))
 }
 
+const DEFAULT_POINT_BUDGET: i64 = 2_000;
+
+fn point_budget(params: Option<&Value>, fallback: i64) -> i64 {
+    let requested = params
+        .and_then(|p| p.get("max_points").or_else(|| p.get("maxPoints")))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(DEFAULT_POINT_BUDGET);
+    requested.clamp(100, fallback.clamp(100, 50_000))
+}
+
+fn budget_bucket(span_ms: i64, preferred: i64, budget: i64) -> i64 {
+    let needed = (span_ms / budget.max(1)).max(1);
+    for window in [60i64, 300, 3_600, 86_400] {
+        if window >= preferred && window >= needed {
+            return window;
+        }
+    }
+    86_400
+}
+
+fn downsample_rows(rows: Vec<serde_json::Value>, budget: i64) -> Vec<serde_json::Value> {
+    if rows.len() as i64 <= budget || budget <= 0 {
+        return rows;
+    }
+    let step = ((rows.len() as f64) / budget as f64).ceil() as usize;
+    rows.into_iter().step_by(step.max(1)).collect()
+}
+
 pub async fn public_get_records_by_uuid(
     state: &AppState,
     params: Option<&Value>,
@@ -108,29 +136,33 @@ pub async fn public_get_records_by_uuid(
 
     let until_ms = Utc::now().timestamp_millis();
     let since_ms = until_ms - hours * 3_600_000;
+    let budget = point_budget(params, 50_000);
 
     // 原始采样只在内存保留约 10 分钟；更久的数据读降采样桶。
-    // 窗口选择：≤1h 用 1 分钟桶，≤24h 用 5 分钟桶，其余用 1 小时桶。
-    let bucket_seconds = if hours <= 1 {
+    // 窗口选择同时受时间范围和返回点数预算约束。
+    let preferred = if hours <= 1 {
         60
     } else if hours <= 24 {
         300
     } else {
         3600
     };
+    let bucket_seconds = budget_bucket(hours * 3_600_000, preferred, budget);
+    let fetch_limit = (budget * 4).clamp(100, 50_000);
 
     let store = state.metric.current_store().await;
     let rows = match metric_key {
         Some(key) => store
-            .list_buckets_for_metric(uuid, key, bucket_seconds, since_ms, until_ms, 50_000)
+            .list_buckets_for_metric(uuid, key, bucket_seconds, since_ms, until_ms, fetch_limit)
             .await,
         None => store
-            .list_buckets(uuid, bucket_seconds, since_ms, until_ms, 50_000)
+            .list_buckets(uuid, bucket_seconds, since_ms, until_ms, fetch_limit)
             .await,
     }
     .map_err(|_| (-32603, "Internal error"))?;
 
-    let records: Vec<Value> = buckets_to_records(uuid, bucket_seconds, &rows, since_ms);
+    let mut records: Vec<Value> = buckets_to_records(uuid, bucket_seconds, &rows, since_ms);
+    records = downsample_rows(records, budget);
 
     if !load_type.is_empty() && load_type != "all" {
         let filtered = filter_by_load_type(&records, load_type);
@@ -198,15 +230,18 @@ pub async fn common_get_records(
 
     let until_ms = Utc::now().timestamp_millis();
     let since_ms = until_ms - hours * 3_600_000;
+    let budget = point_budget(params, max_count);
 
     // 原始采样只在内存（board）保留约 10 分钟；更久读降采样桶。
-    let bucket_seconds = if hours <= 1 {
+    let preferred = if hours <= 1 {
         60
     } else if hours <= 24 {
         300
     } else {
         3600
     };
+    let bucket_seconds = budget_bucket(hours * 3_600_000, preferred, budget);
+    let fetch_limit = (budget * 4).clamp(100, 50_000);
 
     let metric_key = params
         .and_then(|p| p.get("metric_key"))
@@ -226,28 +261,40 @@ pub async fn common_get_records(
     let mut grouped: std::collections::HashMap<String, Vec<Value>> =
         std::collections::HashMap::new();
     let per_node_limit = if uuid.is_some() {
-        max_count as i64
+        fetch_limit
     } else {
-        5_000
+        (fetch_limit as usize / node_list.len().max(1)).max(100) as i64
     };
-    for client in &node_list {
-        let node_rows = match metric_key {
-            Some(key) => {
-                store
-                    .list_buckets_for_metric(client, key, bucket_seconds, since_ms, until_ms, per_node_limit)
-                    .await
-            }
-            None => {
-                store
-                    .list_buckets(client, bucket_seconds, since_ms, until_ms, per_node_limit)
-                    .await
-            }
-        };
-        let Ok(node_rows) = node_rows else {
-            continue;
-        };
-        for rec in buckets_to_records(client, bucket_seconds, &node_rows, since_ms) {
-            grouped.entry(client.clone()).or_default().push(rec);
+    if metric_key.is_none() && node_list.len() > 1 {
+        let rows_by_node = store
+            .list_buckets_multi(&node_list, None, bucket_seconds, since_ms, until_ms, fetch_limit)
+            .await
+            .map_err(|_| (-32603, "Internal error"))?;
+        for (client, rows) in rows_by_node {
+            let mut records = buckets_to_records(&client, bucket_seconds, &rows, since_ms);
+            records = downsample_rows(records, budget);
+            grouped.insert(client, records);
+        }
+    } else {
+        for client in &node_list {
+            let node_rows = match metric_key {
+                Some(key) => {
+                    store
+                        .list_buckets_for_metric(client, key, bucket_seconds, since_ms, until_ms, per_node_limit)
+                        .await
+                }
+                None => {
+                    store
+                        .list_buckets(client, bucket_seconds, since_ms, until_ms, per_node_limit)
+                        .await
+                }
+            };
+            let Ok(node_rows) = node_rows else {
+                continue;
+            };
+            let mut records = buckets_to_records(client, bucket_seconds, &node_rows, since_ms);
+            records = downsample_rows(records, budget);
+            grouped.insert(client.clone(), records);
         }
     }
 
@@ -482,4 +529,21 @@ pub fn v2_report_from_sample(sample: &TelemetrySample, basic: &BasicInfoParams) 
         }
     }
     report
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn budget_bucket_respects_requested_and_budget() {
+        assert_eq!(budget_bucket(3_600_000, 60, 2_000), 3_600);
+        assert_eq!(budget_bucket(86_400_000, 300, 2_000), 86_400);
+    }
+
+    #[test]
+    fn downsample_keeps_points_bounded() {
+        let rows = (0..10_000).map(|i| json!({ "value": i })).collect();
+        assert_eq!(downsample_rows(rows, 2_000).len(), 2_000);
+    }
 }

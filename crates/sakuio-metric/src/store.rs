@@ -173,6 +173,52 @@ impl MetricStore {
         Ok(())
     }
 
+    /// Batches several nodes into one query instead of issuing one query per node.
+    pub async fn list_buckets_multi(
+        &self,
+        nodes: &[String],
+        metric_key: Option<&str>,
+        bucket_seconds: i64,
+        since_ms: i64,
+        until_ms: i64,
+        limit: i64,
+    ) -> Result<std::collections::HashMap<String, Vec<BucketRow>>, MetricError> {
+        let mut grouped: std::collections::HashMap<String, Vec<BucketRow>> =
+            std::collections::HashMap::new();
+        if nodes.is_empty() {
+            return Ok(grouped);
+        }
+        const CHUNK: usize = 400;
+        for chunk in nodes.chunks(CHUNK) {
+            let placeholders = std::iter::repeat("?").take(chunk.len()).collect::<Vec<_>>().join(", ");
+            let metric_filter = if metric_key.is_some() { " AND metric_key = ?" } else { "" };
+            let sql = format!(
+                "SELECT node_uuid, metric_key, bucket_seconds, bucket_start_ms, \
+                 avg_val, min_val, max_val, sample_count FROM {} \
+                 WHERE node_uuid IN ({placeholders}) AND bucket_seconds = ? \
+                 AND bucket_start_ms >= ? AND bucket_start_ms <= ?{metric_filter} \
+                 ORDER BY node_uuid, bucket_start_ms LIMIT ?",
+                self.table("buckets"),
+            );
+            let mut query = sqlx::query_as::<_, (String, String, i64, i64, f64, f64, f64, i64)>(&sql);
+            for node in chunk {
+                query = query.bind(node.clone());
+            }
+            query = query.bind(bucket_seconds).bind(since_ms).bind(until_ms);
+            if let Some(key) = metric_key {
+                query = query.bind(key.to_string());
+            }
+            let rows = query.bind(limit).fetch_all(&self.pool).await?;
+            for (node_uuid, metric_key, bucket_seconds, bucket_start_ms, avg_val, min_val, max_val, sample_count) in rows {
+                grouped.entry(node_uuid.clone()).or_default().push(BucketRow {
+                    node_uuid, metric_key, bucket_seconds, bucket_start_ms,
+                    avg_val, min_val, max_val, sample_count,
+                });
+            }
+        }
+        Ok(grouped)
+    }
+
     /// Same as [`Self::list_buckets`], but narrows the SQL scan to one metric key.
     pub async fn list_buckets_for_metric(
         &self,
