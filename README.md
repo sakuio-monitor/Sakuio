@@ -127,7 +127,7 @@ Sakuio/
 Thanks to everyone who has contributed code, themes, documentation, translations, bug reports, or feedback. Your work helps Sakuio keep improving.
 
 <a href="https://github.com/sakuio-monitor/Sakuio/graphs/contributors">
-  <img src="https://contributors-img.web.app/image?repo=sakuio-monitor/Sakuio" alt="Sakuio contributors" width="600">
+  <img src="https://contributors-img.web.app/image?repo=sakuio-monitor/Sakuio" alt="Sakuio contributors">
 </a>
 
 ## License
