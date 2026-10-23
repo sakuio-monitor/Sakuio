@@ -62,19 +62,38 @@ ask_tty() {
   printf '%s' "${answer:-$default}"
 }
 
+SCRIPT_ONLY=0
 if [[ "$INTERACTIVE" -eq 1 ]]; then
-  port_input="$(ask_tty "监听端口 [8555]: " "8555")"
-  if [[ ! "$port_input" =~ ^[0-9]+$ ]] || (( port_input < 1 || port_input > 65535 )); then
-    echo "error: invalid port: $port_input" >&2
-    exit 1
-  fi
-  LISTEN="0.0.0.0:${port_input}"
-
   dir_input="$(ask_tty "安装目录 [/opt/sakuio]: " "/opt/sakuio")"
   INSTALL_DIR="${dir_input:-/opt/sakuio}"
 
-  proxy_input="$(ask_tty "GitHub 加速站 URL（留空使用官方）: " "")"
-  [[ -n "$proxy_input" ]] && GITHUB_PROXY="$proxy_input"
+  if [[ -x "$INSTALL_DIR/sakuio-server" || -f "$INSTALL_DIR/config.yaml" ]]; then
+    printf '\n检测到已安装的 Sakuio：%s\n' "$INSTALL_DIR"
+    printf '  1) 更新程序和管理脚本\n'
+    printf '  2) 只更新管理脚本\n'
+    printf '  0) 取消\n'
+    while true; do
+      action="$(ask_tty "请选择 [1-2]: " "1")"
+      case "$action" in
+        1) SCRIPT_ONLY=0; break ;;
+        2) SCRIPT_ONLY=1; break ;;
+        0) echo "已取消"; exit 0 ;;
+        *) echo "无效选项" ;;
+      esac
+    done
+  fi
+
+  if [[ "$SCRIPT_ONLY" -eq 0 ]]; then
+    port_input="$(ask_tty "监听端口 [8555]: " "8555")"
+    if [[ ! "$port_input" =~ ^[0-9]+$ ]] || (( port_input < 1 || port_input > 65535 )); then
+      echo "error: invalid port: $port_input" >&2
+      exit 1
+    fi
+    LISTEN="0.0.0.0:${port_input}"
+
+    proxy_input="$(ask_tty "GitHub 加速站 URL（留空使用官方）: " "")"
+    [[ -n "$proxy_input" ]] && GITHUB_PROXY="$proxy_input"
+  fi
 fi
 
 # Accept accelerators such as https://ghfast.top and expand them to the
@@ -120,6 +139,8 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
   echo "Sakuio server uninstalled."
   exit 0
 fi
+
+if [[ "$SCRIPT_ONLY" -eq 0 ]]; then
 
 # ---- platform detection -----------------------------------------------------
 OS="$(uname -s)"
@@ -274,6 +295,9 @@ WantedBy=multi-user.target
 UNITEOF
   systemctl daemon-reload
   systemctl enable --now "$SERVICE_NAME"
+fi
+
+
 fi
 
 # ---- install the `sakuio` management command --------------------------------
