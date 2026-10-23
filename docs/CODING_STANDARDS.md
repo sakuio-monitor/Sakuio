@@ -31,11 +31,12 @@ fn name(&self) -> &'static str;
 tracing::info!(node_uuid = %uuid, session_id = %sid, "agent board session established");
 ```
 
-## 数据库迁移 / Migrations
+## 数据库 / Database
 
-- Board / 配置库 SQL：**`000000NN_<slug>.sql`**（8 位数字 + 下划线，参考 Tanzaku `tz-board/migrations`）。
-- **`migrations/` 目录仅放可执行 `.sql`**；不要 `.down.sql` 或文档，避免被 `sqlx::migrate!()` 一并 embed。
-- 新版本只 **新建** 下一个 `NN`，禁止改已存在迁移文件内容。
+- 表结构是**声明式**的：在 `crates/sakuio-db/src/schema.rs` 的 `TABLES` 中增列/增表；启动时按方言渲染并只增不改地补齐。
+- SQL 一律写可移植的 `?` 占位符，由 `DbPool` 按后端重写；**禁止**在同一份仓储代码里写 `$1` / 方言分支，除非确属方言能力差异（如 `RETURNING`、`last_insert_id`）。
+- 标识符若为保留字（如 MySQL `key`），必须走 `quote_ident`。
+- 新增查询必须同时通过 `scripts/test-backends.sh`（SQLite / PostgreSQL / MySQL / MariaDB）。
 
 ## 前端 / Frontend
 

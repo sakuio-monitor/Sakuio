@@ -26,7 +26,7 @@ Sakuio-frontend（前端）
 
 **流程**（`.github/workflows/release.yml`）：
 
-1. `build` job 按矩阵交叉编译，产出裸二进制（无压缩包，对齐 Komari 风格）：
+1. `build` job 按矩阵交叉编译，产出裸二进制（无压缩包，统一命名风格）：
 
    | 目标 | 工具链 | 资产名 |
    |---|---|---|
@@ -77,9 +77,17 @@ curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio-agent/main/in
 
 ## 3. Sakuio（中控）
 
-当前无 CI：本地 `cargo run` 验证，发布流程待迁移数据面稳定后接入
-（计划：tag `v*` 构建 linux-amd64/arm64 产物 + 迁移校验）。改动推送前
-必须本地编译通过。
+CI：`.github/workflows/ci.yml` 在 push main 和 pull request 时执行：
+
+- `cargo test --workspace --all-targets`
+- `cargo test -p sakuio-server ddns:: -- --nocapture`
+
+DDNS / 授权 API 的驱动注册、Cloudflare Token/Global Key 配置解析、A/AAAA
+地址选择、错误路径和数据库辅助函数均有单元测试。真实 Cloudflare 网络不在
+CI 中访问。
+
+发布流程待迁移数据面稳定后接入（计划：tag `v*` 构建 linux-amd64/arm64
+产物 + 迁移校验）。改动推送前必须本地编译通过。
 
 ## 4. Sakuio-frontend（前端）
 
