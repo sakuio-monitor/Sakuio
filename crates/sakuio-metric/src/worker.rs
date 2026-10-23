@@ -53,6 +53,7 @@ pub struct MetricWriterHandle {
     store_tx: watch::Sender<Arc<MetricStore>>,
     policy: Arc<RwLock<Arc<RetentionPolicy>>>,
     workers: Arc<StdRwLock<WorkerSet>>,
+    start_all: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl MetricWriterHandle {
@@ -89,12 +90,25 @@ impl MetricWriterHandle {
     /// partially filled windows, and waits for the result.
     /// 让写入器把内存中的全部桶（含未填满窗口）写入 `store` 并等待结果。
     pub async fn flush_to_store(&self, store: Arc<MetricStore>) -> Result<u64, String> {
+        // Start every pre-created shard so queued samples assigned to a not-yet
+        // scaled worker are aggregated before the database switch.
+        (self.start_all)();
         let senders = self
             .workers
             .read()
             .map_err(|_| "metric worker lock poisoned".to_string())?
             .control
-            .clone();
+            .iter()
+            .enumerate()
+            .filter_map(|(index, sender)| {
+                self.workers
+                    .read()
+                    .ok()
+                    .and_then(|workers| workers.started.get(index).copied())
+                    .filter(|started| *started)
+                    .map(|_| sender.clone())
+            })
+            .collect::<Vec<_>>();
         if senders.is_empty() {
             return Err("metric writer stopped".into());
         }
@@ -132,6 +146,9 @@ type Overflow = Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<Telem
 struct WorkerSet {
     ingest: Vec<mpsc::Sender<MetricIngestJob>>,
     control: Vec<mpsc::Sender<WriterCommand>>,
+    receivers: Vec<Option<mpsc::Receiver<MetricIngestJob>>>,
+    control_receivers: Vec<Option<mpsc::Receiver<WriterCommand>>>,
+    started: Vec<bool>,
 }
 
 impl MetricWriter {
@@ -146,31 +163,53 @@ impl MetricWriter {
             .unwrap_or(1)
             .max(1);
         let capacity = config.queue_capacity.max(64);
-        let (ingest_tx, ingest_rx) = mpsc::channel::<MetricIngestJob>(capacity);
-        let (control_tx, control_rx) = mpsc::channel::<WriterCommand>(4);
+        let mut ingest = Vec::with_capacity(max_workers);
+        let mut control = Vec::with_capacity(max_workers);
+        let mut receivers = Vec::with_capacity(max_workers);
+        let mut control_receivers = Vec::with_capacity(max_workers);
+        for _ in 0..max_workers {
+            let (ingest_tx, ingest_rx) = mpsc::channel::<MetricIngestJob>(capacity);
+            let (control_tx, control_rx) = mpsc::channel::<WriterCommand>(4);
+            ingest.push(ingest_tx);
+            control.push(control_tx);
+            receivers.push(Some(ingest_rx));
+            control_receivers.push(Some(control_rx));
+        }
         let workers = Arc::new(StdRwLock::new(WorkerSet {
-            ingest: vec![ingest_tx],
-            control: vec![control_tx],
+            ingest,
+            control,
+            receivers,
+            control_receivers,
+            started: vec![false; max_workers],
         }));
         let dropped = Arc::new(AtomicU64::new(0));
         let overflow: Overflow = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let (store_tx, store_rx) = watch::channel(store);
         let policy: Arc<RwLock<Arc<RetentionPolicy>>> = Arc::new(RwLock::new(Arc::default()));
+        let start_all = {
+            let workers = workers.clone();
+            let store_rx = store_rx.clone();
+            let policy = policy.clone();
+            let dropped = dropped.clone();
+            Arc::new(move || {
+                for index in 0..max_workers {
+                    spawn_slot(&workers, index, store_rx.clone(), policy.clone(), dropped.clone());
+                }
+            })
+        };
         let handle = MetricWriterHandle {
             store_tx: store_tx.clone(),
             policy: policy.clone(),
             workers: workers.clone(),
+            start_all,
         };
-        spawn_worker(
-            ingest_rx,
-            control_rx,
-            store_rx.clone(),
-            policy.clone(),
-            dropped.clone(),
-        );
 
-        // Autoscaler: one worker starts immediately, additional workers are
-        // added only while queues are backing up, capped at logical CPU count.
+        // Workers are addressed by a fixed virtual shard count, so adding a
+        // worker never changes the shard a node was assigned to.
+        spawn_slot(&workers, 0, store_rx.clone(), policy.clone(), dropped.clone());
+
+        // Autoscaler: start more pre-created slots while queues back up, but
+        // never rehash an already assigned node.
         let workers_scale = workers.clone();
         let store_scale = store_rx.clone();
         let policy_scale = policy.clone();
@@ -179,24 +218,23 @@ impl MetricWriter {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                let mut guard = match workers_scale.write() {
-                    Ok(guard) => guard,
-                    Err(_) => return,
+                let (load, next) = {
+                    let guard = match workers_scale.read() {
+                        Ok(guard) => guard,
+                        Err(_) => return,
+                    };
+                    let load: usize = guard
+                        .ingest
+                        .iter()
+                        .map(|tx| tx.max_capacity().saturating_sub(tx.capacity()))
+                        .sum();
+                    (load, guard.started.iter().position(|started| !started))
                 };
-                let load: usize = guard
-                    .ingest
-                    .iter()
-                    .map(|tx| tx.max_capacity().saturating_sub(tx.capacity()))
-                    .sum();
-                if guard.ingest.len() < max_workers && load > capacity / 4 {
-                    let (tx, rx) = mpsc::channel::<MetricIngestJob>(capacity);
-                    let (ctl_tx, ctl_rx) = mpsc::channel::<WriterCommand>(4);
-                    guard.ingest.push(tx);
-                    guard.control.push(ctl_tx);
-                    spawn_worker(rx, ctl_rx, store_scale.clone(), policy_scale.clone(), dropped_scale.clone());
+                if load > capacity / 4 {
+                    if let Some(index) = next {
+                        spawn_slot(&workers_scale, index, store_scale.clone(), policy_scale.clone(), dropped_scale.clone());
+                    }
                 }
-                drop(guard);
-
                 // Coalesced overflow is re-injected when capacity opens up.
                 let pending: Vec<(String, Vec<TelemetrySample>)> = {
                     match overflow_scale.lock() {
@@ -287,15 +325,15 @@ fn try_enqueue(
         drop(guard);
         return false;
     }
-    let start = shard_index(&node_uuid, guard.ingest.len());
+    // A node must always stay on the same shard: a different aggregator would
+    // have a different traffic baseline and could emit duplicate buckets.
+    let index = shard_index(&node_uuid, guard.ingest.len());
+    let tx = &guard.ingest[index];
     let mut job = Some(MetricIngestJob { node_uuid: node_uuid.clone(), samples });
-    for offset in 0..guard.ingest.len() {
-        let tx = &guard.ingest[(start + offset) % guard.ingest.len()];
-        match tx.try_send(job.take().expect("metric job")) {
-            Ok(()) => return true,
-            Err(mpsc::error::TrySendError::Full(returned)) => job = Some(returned),
-            Err(mpsc::error::TrySendError::Closed(_)) => {}
-        }
+    match tx.try_send(job.take().expect("metric job")) {
+        Ok(()) => return true,
+        Err(mpsc::error::TrySendError::Full(returned)) => job = Some(returned),
+        Err(mpsc::error::TrySendError::Closed(_)) => {}
     }
     drop(guard);
 
@@ -313,6 +351,32 @@ fn try_enqueue(
         }
     }
     false
+}
+
+fn spawn_slot(
+    workers: &Arc<StdRwLock<WorkerSet>>,
+    index: usize,
+    store_rx: watch::Receiver<Arc<MetricStore>>,
+    policy: Arc<RwLock<Arc<RetentionPolicy>>>,
+    dropped: Arc<AtomicU64>,
+) {
+    let (rx, control_rx) = {
+        let mut guard = match workers.write() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        if guard.started.get(index).copied().unwrap_or(true) {
+            return;
+        }
+        guard.started[index] = true;
+        (
+            guard.receivers[index].take(),
+            guard.control_receivers[index].take(),
+        )
+    };
+    if let (Some(rx), Some(control_rx)) = (rx, control_rx) {
+        spawn_worker(rx, control_rx, store_rx, policy, dropped);
+    }
 }
 
 fn spawn_worker(
