@@ -50,6 +50,9 @@ impl MetricKind {
 #[derive(Clone)]
 pub struct MetricStore {
     pool: DbPool,
+    /// Read-only pool for history queries; separate from the writer pool so a
+    /// flush or a large scan cannot exhaust all connections.
+    query_pool: Option<DbPool>,
     prefix: String,
     kind: MetricKind,
     dialect: DbKind,
@@ -69,6 +72,7 @@ impl MetricStore {
                 .map_err(|e| crate::PoolError::Connect(e.to_string()))?;
             return Ok(Self {
                 pool: main_pool.clone(),
+                query_pool: None,
                 prefix,
                 kind: MetricKind::Merged,
                 dialect: main_pool.kind(),
@@ -92,8 +96,22 @@ impl MetricStore {
         sakuio_db::ensure_metric_schema(&pool, &prefix)
             .await
             .map_err(|e| crate::PoolError::Connect(e.to_string()))?;
+        // A second pool keeps long history scans away from the writer.
+        let query_pool = DbPool::connect_with(
+            AnyPoolOptions::new()
+                .max_connections((cfg.max_connections / 2).max(1))
+                .min_connections(0)
+                .acquire_timeout(std::time::Duration::from_secs(15)),
+            &cfg.dsn,
+        )
+        .await
+        .ok();
+        if query_pool.is_none() {
+            tracing::warn!("metric query pool unavailable; queries share the writer pool");
+        }
         Ok(Self {
             pool,
+            query_pool,
             prefix,
             kind,
             dialect,
@@ -116,11 +134,18 @@ impl MetricStore {
         &self.pool
     }
 
+    fn read_pool(&self) -> &DbPool {
+        self.query_pool.as_ref().unwrap_or(&self.pool)
+    }
+
     /// Closes the pool, never touching the shared main pool.
     /// 关闭连接池；与主库共享的池不受影响。
     pub async fn shutdown(&self) {
         if self.kind != MetricKind::Merged {
             self.pool.close().await;
+        }
+        if let Some(pool) = &self.query_pool {
+            pool.close().await;
         }
     }
 
@@ -208,7 +233,7 @@ impl MetricStore {
             if let Some(key) = metric_key {
                 query = query.bind(key.to_string());
             }
-            let rows = query.bind(limit).fetch_all(&self.pool).await?;
+            let rows = query.bind(limit).fetch_all(self.read_pool()).await?;
             for (node_uuid, metric_key, bucket_seconds, bucket_start_ms, avg_val, min_val, max_val, sample_count) in rows {
                 grouped.entry(node_uuid.clone()).or_default().push(BucketRow {
                     node_uuid, metric_key, bucket_seconds, bucket_start_ms,
@@ -244,7 +269,7 @@ impl MetricStore {
             .bind(since_ms)
             .bind(until_ms)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.read_pool())
             .await?;
         Ok(rows
             .into_iter()
@@ -283,7 +308,7 @@ impl MetricStore {
         let rows = sqlx::query_as::<_, (i64, String, String, i64, i64, f64, f64, f64, i64)>(&sql)
             .bind(after_id)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.read_pool())
             .await?;
         Ok(rows
             .into_iter()
@@ -346,7 +371,7 @@ impl MetricStore {
             .bind(since_ms)
             .bind(until_ms)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.read_pool())
             .await?;
         Ok(rows
             .into_iter()
@@ -431,7 +456,7 @@ impl MetricStore {
             "SELECT metric_key, days FROM {}",
             self.table("retention")
         ))
-        .fetch_all(&self.pool)
+        .fetch_all(self.read_pool())
         .await?;
         Ok(rows)
     }
@@ -476,7 +501,7 @@ impl MetricStore {
             DbKind::Postgres => "SELECT CAST(pg_database_size(current_database()) AS TEXT)",
         };
         let row: Option<(Option<String>,)> = sqlx::query_as(sql)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.read_pool())
             .await
             .ok()
             .flatten();
