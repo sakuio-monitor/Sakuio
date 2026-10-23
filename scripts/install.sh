@@ -76,6 +76,7 @@ ask_tty() {
 }
 
 SCRIPT_ONLY=0
+LISTEN="${LISTEN:-0.0.0.0:8555}"
 if [[ "$INTERACTIVE" -eq 1 ]]; then
   DEFAULT_INSTALL_DIR="/opt/sakuio"
   INSTALL_DIR="$DEFAULT_INSTALL_DIR"
@@ -582,9 +583,9 @@ CLIEOF
 chmod 755 "$INSTALL_DIR/sakuio"
 ln -sfn "$INSTALL_DIR/sakuio" /usr/local/bin/sakuio
 
-printf '\n${C_GREEN}========================================${C_RESET}\n'
-printf ' ${C_BOLD}Sakuio 安装完成${C_RESET}\n'
-printf '========================================\n'
-printf ' 监听地址: ${C_CYAN}%s${C_RESET}\n' "$LISTEN"
-printf ' 管理命令: ${C_CYAN}sudo sakuio${C_RESET}\n'
-printf ' 初始化:   ${C_CYAN}http://<服务器地址>:%s${C_RESET}\n\n' "$(echo "$LISTEN" | sed 's/.*://')"
+printf '\n%s========================================%s\n' "$C_GREEN" "$C_RESET"
+printf ' %sSakuio 安装完成%s\n' "$C_BOLD" "$C_RESET"
+printf '%s========================================%s\n' "$C_GREEN" "$C_RESET"
+printf ' 监听地址: %s%s%s\n' "$C_CYAN" "$LISTEN" "$C_RESET"
+printf ' 管理命令: %ssudo sakuio%s\n' "$C_CYAN" "$C_RESET"
+printf ' 初始化:   %shttp://<服务器地址>:%s%s\n\n' "$C_CYAN" "$(echo "$LISTEN" | sed 's/.*://')" "$C_RESET"
