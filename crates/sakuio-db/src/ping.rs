@@ -17,6 +17,7 @@ pub type PingDbResult<T> = Result<T, PingDbError>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PingTaskRow {
     pub id: i64,
+    #[serde(default)]
     pub weight: i32,
     pub name: String,
     pub clients: Vec<String>,
