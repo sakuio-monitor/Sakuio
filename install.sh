@@ -52,46 +52,59 @@ printf '\n========================================\n'
 printf ' Sakuio Server 安装程序\n'
 printf '========================================\n\n'
 
+if [[ -t 1 ]]; then
+  C_RESET=$'\033[0m'
+  C_BOLD=$'\033[1m'
+  C_DIM=$'\033[2m'
+  C_CYAN=$'\033[36m'
+  C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'
+  C_RED=$'\033[31m'
+else
+  C_RESET=""; C_BOLD=""; C_DIM=""; C_CYAN=""; C_GREEN=""; C_YELLOW=""; C_RED=""
+fi
+
 # Short command (`curl ... | sudo bash`) asks only for the essentials.
 # When stdin is the script pipe, read prompts from /dev/tty.
 ask_tty() {
   local prompt="$1" default="$2" answer=""
-  if [[ -r /dev/tty ]]; then
-    read -r -p "$prompt" answer < /dev/tty || true
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    printf '%s\n  %s>%s ' "$prompt" "$C_GREEN" "$C_RESET" > /dev/tty
+    read -r answer < /dev/tty || true
   fi
   printf '%s' "${answer:-$default}"
 }
 
 SCRIPT_ONLY=0
 if [[ "$INTERACTIVE" -eq 1 ]]; then
-  dir_input="$(ask_tty "安装目录 [/opt/sakuio]: " "/opt/sakuio")"
+  dir_input="$(ask_tty "${C_BOLD}请输入安装目录${C_RESET}\n${C_DIM}直接回车使用 /opt/sakuio${C_RESET}" "/opt/sakuio")"
   INSTALL_DIR="${dir_input:-/opt/sakuio}"
 
   if [[ -x "$INSTALL_DIR/sakuio-server" || -f "$INSTALL_DIR/config.yaml" ]]; then
-    printf '\n检测到已安装的 Sakuio：%s\n' "$INSTALL_DIR"
-    printf '  1) 更新程序和管理脚本\n'
-    printf '  2) 只更新管理脚本\n'
-    printf '  0) 取消\n'
+    printf '\n%s已检测到安装%s：%s\n\n' "$C_YELLOW" "$C_RESET" "$INSTALL_DIR"
+    printf '  %s1)%s 更新程序和管理脚本\n' "$C_GREEN" "$C_RESET"
+    printf '  %s2)%s 只更新管理脚本\n' "$C_GREEN" "$C_RESET"
+    printf '  %s0)%s 取消\n' "$C_RED" "$C_RESET"
     while true; do
-      action="$(ask_tty "请选择 [1-2]: " "1")"
+      action="$(ask_tty "${C_BOLD}请选择更新方式${C_RESET}\n  ${C_DIM}1 = 更新程序和管理脚本；2 = 只更新管理脚本；0 = 取消${C_RESET}" "1")"
       case "$action" in
         1) SCRIPT_ONLY=0; break ;;
         2) SCRIPT_ONLY=1; break ;;
-        0) echo "已取消"; exit 0 ;;
+        0) echo "${C_DIM}已取消${C_RESET}"; exit 0 ;;
         *) echo "无效选项" ;;
       esac
     done
   fi
 
   if [[ "$SCRIPT_ONLY" -eq 0 ]]; then
-    port_input="$(ask_tty "监听端口 [8555]: " "8555")"
+    port_input="$(ask_tty "${C_BOLD}请输入程序监听端口${C_RESET}\n${C_DIM}直接回车使用默认端口 8555${C_RESET}" "8555")"
     if [[ ! "$port_input" =~ ^[0-9]+$ ]] || (( port_input < 1 || port_input > 65535 )); then
-      echo "error: invalid port: $port_input" >&2
+      echo "${C_RED}错误：监听端口无效：$port_input${C_RESET}" >&2
       exit 1
     fi
     LISTEN="0.0.0.0:${port_input}"
 
-    proxy_input="$(ask_tty "GitHub 加速站 URL（留空使用官方）: " "")"
+    proxy_input="$(ask_tty "${C_BOLD}请输入 GitHub 加速站地址${C_RESET}\n${C_DIM}不需要加速请直接回车${C_RESET}" "")"
     [[ -n "$proxy_input" ]] && GITHUB_PROXY="$proxy_input"
   fi
 fi
@@ -176,8 +189,8 @@ ASSET="sakuio-server-${OS}-${ARCH}"
 BASE="${GITHUB_BASE}/${REPO}/releases/download/v${VERSION}"
 DOWNLOAD_URL="${BASE}/${ASSET}"
 
-echo "==> installing Sakuio server v${VERSION} (${OS}/${ARCH})"
-echo "==> downloading ${DOWNLOAD_URL}"
+printf "${C_CYAN}==>${C_RESET} 正在安装 Sakuio Server %s (%s/%s)\n" "$VERSION" "$OS" "$ARCH"
+printf "${C_DIM}    %s${C_RESET}\n" "$DOWNLOAD_URL"
 
 mkdir -p "$INSTALL_DIR/data"
 TMP="$(mktemp)"
@@ -321,6 +334,13 @@ github_base() {
 }
 IS_DARWIN=0
 [[ "\$(uname -s)" == "Darwin" ]] && IS_DARWIN=1
+
+if [[ -t 1 ]]; then
+  C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+  C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'
+else
+  C_RESET=""; C_BOLD=""; C_DIM=""; C_CYAN=""; C_GREEN=""; C_YELLOW=""; C_RED=""
+fi
 
 require_root() {
   if [[ "\$(id -u)" -ne 0 ]]; then
@@ -472,7 +492,7 @@ do_disable_totp() {
 
 pause() {
   if [[ -t 0 ]]; then
-    read -r -p "按 Enter 返回菜单..." _
+    read -r -p "${C_DIM}按 Enter 返回菜单...${C_RESET}" _
   fi
 }
 
@@ -483,10 +503,16 @@ menu() {
   else
     state="\$(systemctl is-active "\$SERVICE_NAME" 2>/dev/null || true)"
   fi
-  printf '\n========================================\n'
-  printf ' Sakuio 管理控制台\n'
-  printf ' 服务状态: %s\n' "\${state:-unknown}"
-  printf '========================================\n'
+  local state_color
+  if [[ "\${state:-}" == "active" || "\${state:-}" == "running" ]]; then
+    state_color="\$C_GREEN"
+  else
+    state_color="\$C_RED"
+  fi
+  printf '\n\033[1;36m╭──────────────────────────────────────╮\033[0m\n'
+  printf '\033[1;36m│\033[0m  \033[1mSakuio 管理控制台\033[0m\n'
+  printf '\033[1;36m│\033[0m  服务状态：%b%s%b\n' "\$state_color" "\${state:-unknown}" "\$C_RESET"
+  printf '\033[1;36m╰──────────────────────────────────────╯\033[0m\n'
   cat <<MENU
   1) 启动服务
   2) 停止服务
@@ -544,8 +570,9 @@ CLIEOF
 chmod 755 "$INSTALL_DIR/sakuio"
 ln -sfn "$INSTALL_DIR/sakuio" /usr/local/bin/sakuio
 
-echo
-echo "Sakuio 安装完成。"
-echo "监听地址: $LISTEN"
-echo "管理命令: sudo sakuio"
-echo "打开 http://<服务器地址>:$(echo "$LISTEN" | sed 's/.*://') 完成初始化。"
+printf '\n${C_GREEN}========================================${C_RESET}\n'
+printf ' ${C_BOLD}Sakuio 安装完成${C_RESET}\n'
+printf '========================================\n'
+printf ' 监听地址: ${C_CYAN}%s${C_RESET}\n' "$LISTEN"
+printf ' 管理命令: ${C_CYAN}sudo sakuio${C_RESET}\n'
+printf ' 初始化:   ${C_CYAN}http://<服务器地址>:%s${C_RESET}\n\n' "$(echo "$LISTEN" | sed 's/.*://')"
