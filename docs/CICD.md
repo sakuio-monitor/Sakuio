@@ -36,6 +36,7 @@ Sakuio-frontend（前端）
    | linux armv7 | `armv7-unknown-linux-musleabihf` | cargo-zigbuild | `sakuio-agent-linux-arm` |
    | linux loongarch64 | `loongarch64-unknown-linux-musl` | cargo-zigbuild | `sakuio-agent-linux-loong64` |
    | linux riscv64 | `riscv64gc-unknown-linux-musl` | cargo-zigbuild | `sakuio-agent-linux-riscv64` |
+   | freebsd x86_64 | 原生 FreeBSD | FreeBSD VM + rust | `sakuio-agent-freebsd-amd64` |
    | darwin aarch64 | `aarch64-apple-darwin` | 原生 | `sakuio-agent-darwin-arm64` |
    | darwin x86_64 | `x86_64-apple-darwin` | 原生 | `sakuio-agent-darwin-amd64` |
    | windows x86_64 | `x86_64-pc-windows-msvc` | MSVC | `sakuio-agent-windows-amd64.exe` |
@@ -48,6 +49,8 @@ Sakuio-frontend（前端）
      不依赖目标机的 glibc 版本；同一资产可在旧版和新版发行版直接运行。
      Release 构建会校验产物不是动态链接。zig 从官方归档直装
      `0.15.2`（实测可用；`setup-zig` 镜像不稳、builds 目录只留最新版）。
+   - FreeBSD x86_64 通过 `vmactions/freebsd-vm` 在真实 FreeBSD 环境中构建，
+     产物使用系统 libc（BSD 没有 musl）。
    - **MIPS 暂不提供**：Rust 上游已移除 mips 预编译 std
      （新版 rustup 对旧通道也拒绝下载），且 zig 不支持 MIPS。后续如需
      mips/mipsel，可评估 nightly `-Z build-std` 自行编标准库的方案。
