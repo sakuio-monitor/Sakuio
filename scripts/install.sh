@@ -83,7 +83,7 @@ if [[ "$INTERACTIVE" -eq 1 ]]; then
   # Re-running for an existing default installation goes straight to the
   # update menu. A custom directory is asked only when nothing is installed.
   if [[ ! -x "$INSTALL_DIR/sakuio-server" && ! -f "$INSTALL_DIR/config.yaml" ]]; then
-    dir_input="$(ask_tty "${C_BOLD}请输入安装目录${C_RESET}\n${C_DIM}直接回车使用 /opt/sakuio${C_RESET}" "/opt/sakuio")"
+    dir_input="$(ask_tty "${C_BOLD}请输入安装目录${C_RESET}${C_DIM}（直接回车使用 /opt/sakuio）${C_RESET}" "/opt/sakuio")"
     INSTALL_DIR="${dir_input:-/opt/sakuio}"
   fi
 
@@ -93,7 +93,7 @@ if [[ "$INTERACTIVE" -eq 1 ]]; then
     printf '  %s2)%s 只更新管理脚本\n' "$C_GREEN" "$C_RESET"
     printf '  %s0)%s 取消\n' "$C_RED" "$C_RESET"
     while true; do
-      action="$(ask_tty "${C_BOLD}请选择更新方式${C_RESET}\n  ${C_DIM}1 = 更新程序和管理脚本；2 = 只更新管理脚本；0 = 取消${C_RESET}" "1")"
+      action="$(ask_tty "${C_BOLD}请选择更新方式${C_RESET}${C_DIM}（1=更新程序和脚本，2=只更新脚本，0=取消）${C_RESET}" "1")"
       case "$action" in
         1) SCRIPT_ONLY=0; break ;;
         2) SCRIPT_ONLY=1; break ;;
@@ -108,7 +108,7 @@ if [[ "$INTERACTIVE" -eq 1 ]]; then
       LISTEN="$(awk '/^listen:[[:space:]]*/{sub(/^listen:[[:space:]]*/, ""); print; exit}' "$INSTALL_DIR/config.yaml")"
       LISTEN="${LISTEN:-0.0.0.0:8555}"
     else
-      port_input="$(ask_tty "${C_BOLD}请输入程序监听端口${C_RESET}\n${C_DIM}直接回车使用默认端口 8555${C_RESET}" "8555")"
+      port_input="$(ask_tty "${C_BOLD}请输入程序监听端口${C_RESET}${C_DIM}（直接回车使用默认端口 8555）${C_RESET}" "8555")"
       if [[ ! "$port_input" =~ ^[0-9]+$ ]] || (( port_input < 1 || port_input > 65535 )); then
         echo "${C_RED}错误：监听端口无效：$port_input${C_RESET}" >&2
         exit 1
@@ -116,7 +116,7 @@ if [[ "$INTERACTIVE" -eq 1 ]]; then
       LISTEN="0.0.0.0:${port_input}"
     fi
 
-    proxy_input="$(ask_tty "${C_BOLD}请输入 GitHub 加速站地址${C_RESET}\n${C_DIM}不需要加速请直接回车${C_RESET}" "")"
+    proxy_input="$(ask_tty "${C_BOLD}请输入 GitHub 加速站地址${C_RESET}${C_DIM}（不需要加速请直接回车）${C_RESET}" "")"
     [[ -n "$proxy_input" ]] && GITHUB_PROXY="$proxy_input"
   fi
 fi
