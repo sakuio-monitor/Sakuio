@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sakuio server one-line installer and service manager installer.
 #
-# curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.sh \
+# curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/scripts/install.sh \
 #   | sudo bash -s -- [--listen 0.0.0.0:8555] [--github-proxy URL]
 #
 # Options:
