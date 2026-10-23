@@ -8,7 +8,7 @@ use axum::{
 };
 use sakuio_board::BoardStateStore;
 use sakuio_db::{AdminClientPatch, ClientRepository, NewClient, PingRepository};
-use sakuio_protocol::{ConfigParams, ControlMessage, ControlOp};
+use sakuio_protocol::{AgentUpdateParams, ConfigParams, ControlMessage, ControlOp, AGENT_LATEST_VERSION, METHOD_AGENT_UPDATE};
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::time::Duration;
@@ -418,5 +418,45 @@ pub async fn batch_set_group(
             )
                 .into_response()
         }
+    }
+}
+
+/// Current agent release supported by this board.
+/// 当前面板支持的最新 Agent 版本。
+pub async fn agent_version(_user: crate::auth::AdminUser) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "version": AGENT_LATEST_VERSION }))
+}
+
+/// Ask a live agent to self-update immediately.
+/// 指示在线 Agent 立即自更新。
+pub async fn update_admin_agent(
+    State(state): State<AppState>,
+    Path(uuid): Path<String>,
+    _user: crate::auth::AdminUser,
+) -> impl IntoResponse {
+    let payload = serde_json::to_value(AgentUpdateParams {
+        target_version: Some(AGENT_LATEST_VERSION.to_string()),
+    })
+    .unwrap_or(serde_json::Value::Null);
+    let message = ControlMessage::new(
+        ControlOp::Cmd,
+        serde_json::json!({
+            "method": METHOD_AGENT_UPDATE,
+            "payload": payload,
+        }),
+    );
+    if state.command_bus.push(&uuid, message).await {
+        tracing::info!(uuid = %uuid, target = AGENT_LATEST_VERSION, "agent update command sent");
+        (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "success": true, "target_version": AGENT_LATEST_VERSION })),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "message": "Agent 当前离线，无法立即更新" })),
+        )
+            .into_response()
     }
 }

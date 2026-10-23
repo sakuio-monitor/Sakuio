@@ -268,6 +268,11 @@ async fn main() -> anyhow::Result<()> {
             get(api::list_admin_clients).post(api::add_client),
         )
         .route("/api/admin/clients/stream", get(api::stream_admin_clients))
+        .route("/api/admin/agents/version", get(api::agent_version))
+        .route(
+            "/api/admin/clients/:uuid/update-agent",
+            post(api::update_admin_agent),
+        )
         .route("/api/admin/clients/sync", post(api::sync_admin_clients))
         .route(
             "/api/admin/clients/:uuid",

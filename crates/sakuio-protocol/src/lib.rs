@@ -10,7 +10,8 @@ mod telemetry;
 pub use control::{
     AgentVersionRange, BasicInfoParams, ConfigParams, ControlMessage, ControlOp, HelloParams,
     SyncCommandItem, SyncReqParams, SyncRespParams, TelemetryAckParams, WelcomeParams,
-    AGENT_VERSION_RANGE_MAX, AGENT_VERSION_RANGE_MIN, DEFAULT_TELEMETRY_INTERVAL_MS,
+    AgentUpdateParams, AGENT_LATEST_VERSION, AGENT_VERSION_RANGE_MAX, AGENT_VERSION_RANGE_MIN,
+    DEFAULT_TELEMETRY_INTERVAL_MS, METHOD_AGENT_UPDATE,
 };
 pub use sktl::{decode_sktl, encode_sktl, SkltPayload, SKTL_MAGIC};
 pub use ping::{
