@@ -1,5 +1,5 @@
-//! Komari-compatible theme manifest (`komari-theme.json`).
-//! 兼容 Komari 的主题清单（`komari-theme.json`）。
+//! Theme manifest support (`sakuio-theme.json` and legacy `komari-theme.json`).
+//! 主题清单：支持 Sakuio 自有命名与 Komari 兼容命名。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,8 +8,19 @@ use serde_json::Value;
 /// 压缩包中主题清单允许的最大字节数。
 pub const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 
-/// Raw `komari-theme.json`.
-/// 原始 `komari-theme.json`。
+/// Preferred Sakuio manifest name; the legacy Komari name remains supported.
+pub const SAKUIO_MANIFEST: &str = "sakuio-theme.json";
+pub const KOMARI_MANIFEST: &str = "komari-theme.json";
+pub const MANIFEST_NAMES: [&str; 2] = [SAKUIO_MANIFEST, KOMARI_MANIFEST];
+
+pub fn manifest_name(dir: &std::path::Path) -> Option<&'static str> {
+    MANIFEST_NAMES
+        .into_iter()
+        .find(|name| dir.join(name).is_file())
+}
+
+/// Raw theme manifest.
+/// 原始主题清单。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThemeManifest {
     #[serde(default)]
@@ -52,7 +63,7 @@ impl ThemeManifest {
     pub fn validate(&self) -> Result<(), String> {
         let short = self.short.trim();
         if short.is_empty() {
-            return Err("komari-theme.json: short is required".into());
+            return Err("theme manifest: short is required".into());
         }
         if short.len() > 64
             || !short
@@ -60,14 +71,14 @@ impl ThemeManifest {
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
             return Err(
-                "komari-theme.json: short may only contain letters, digits, '_' and '-'".into(),
+                "theme manifest: short may only contain letters, digits, '_' and '-'".into(),
             );
         }
         if short.eq_ignore_ascii_case("default") {
-            return Err("komari-theme.json: 'default' is reserved".into());
+            return Err("theme manifest: 'default' is reserved".into());
         }
         if self.display_name().trim().is_empty() {
-            return Err("komari-theme.json: name is required".into());
+            return Err("theme manifest: name is required".into());
         }
         Ok(())
     }

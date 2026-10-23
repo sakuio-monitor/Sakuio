@@ -2,7 +2,7 @@
 //! 与 Komari `data/theme/<short>` 布局兼容的文件系统主题仓库。
 
 use crate::theme::archive::{commit_staging, extract_to_staging, safe_join};
-use crate::theme::manifest::ThemeManifest;
+use crate::theme::manifest::{manifest_name, ThemeManifest};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -54,7 +54,7 @@ impl ThemeStore {
 
     pub fn exists(&self, short: &str) -> bool {
         self.theme_dir(short)
-            .is_some_and(|dir| dir.join("komari-theme.json").is_file())
+            .is_some_and(|dir| manifest_name(&dir).is_some())
     }
 
     /// Lists installed themes, skipping invalid or half-written directories.
@@ -83,10 +83,12 @@ impl ThemeStore {
         let dir = self
             .theme_dir(short)
             .ok_or_else(|| format!("invalid theme name: {short}"))?;
-        let raw = std::fs::read(dir.join("komari-theme.json"))
-            .map_err(|e| format!("read {short}/komari-theme.json: {e}"))?;
+        let name = manifest_name(&dir)
+            .ok_or_else(|| format!("theme {short} is missing sakuio-theme.json or komari-theme.json"))?;
+        let raw = std::fs::read(dir.join(name))
+            .map_err(|e| format!("read {short}/{name}: {e}"))?;
         let manifest: ThemeManifest = serde_json::from_slice(&raw)
-            .map_err(|e| format!("parse {short}/komari-theme.json: {e}"))?;
+            .map_err(|e| format!("parse {short}/{name}: {e}"))?;
         manifest.validate()?;
         if manifest.short != short {
             return Err(format!(

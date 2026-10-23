@@ -1,7 +1,7 @@
 //! Safe extraction and validation of Komari theme ZIP archives.
 //! Komari 主题 ZIP 的安全解压与校验。
 
-use crate::theme::manifest::{ThemeManifest, MAX_MANIFEST_BYTES};
+use crate::theme::manifest::{ThemeManifest, MANIFEST_NAMES, MAX_MANIFEST_BYTES};
 use std::io::{Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use zip::ZipArchive;
@@ -64,22 +64,22 @@ pub fn extract_to_staging(root: &Path, archive: &[u8]) -> Result<(ThemeManifest,
             .filter(|part| !part.is_empty() && *part != ".")
             .collect();
         match parts.as_slice() {
-            ["komari-theme.json"] => {
-                manifest_name = Some("komari-theme.json".into());
+            [file] if MANIFEST_NAMES.contains(file) => {
+                manifest_name = Some((*file).to_string());
                 prefix = Some(String::new());
             }
-            [dir, "komari-theme.json"] if *dir != "__MACOSX" => {
+            [dir, file] if *dir != "__MACOSX" && MANIFEST_NAMES.contains(file) => {
                 if prefix.as_deref().is_some_and(|existing| existing != *dir) {
                     return Err("theme archive contains multiple top-level directories".into());
                 }
                 prefix = Some((*dir).to_string());
-                manifest_name = Some(format!("{dir}/komari-theme.json"));
+                manifest_name = Some(format!("{dir}/{file}"));
             }
             _ => {}
         }
     }
     let (Some(prefix), Some(_manifest_name)) = (prefix, manifest_name) else {
-        return Err("komari-theme.json not found at the archive root".into());
+        return Err("sakuio-theme.json or komari-theme.json not found at the archive root".into());
     };
     if prefix.is_empty() {
         // Root layout: no nested directories are stripped.
@@ -141,16 +141,17 @@ pub fn extract_to_staging(root: &Path, archive: &[u8]) -> Result<(ThemeManifest,
             }
         }
 
-        let manifest_path = staging.join("komari-theme.json");
+        let name = crate::theme::manifest::manifest_name(&staging)
+            .ok_or_else(|| "theme manifest not found after extraction".to_string())?;
+        let manifest_path = staging.join(name);
         let metadata = std::fs::metadata(&manifest_path)
-            .map_err(|_| "komari-theme.json not found after extraction".to_string())?;
+            .map_err(|_| format!("{name} not found after extraction"))?;
         if metadata.len() > MAX_MANIFEST_BYTES {
-            return Err("komari-theme.json exceeds the size limit".into());
+            return Err(format!("{name} exceeds the size limit"));
         }
-        let raw =
-            std::fs::read(&manifest_path).map_err(|e| format!("read komari-theme.json: {e}"))?;
+        let raw = std::fs::read(&manifest_path).map_err(|e| format!("read {name}: {e}"))?;
         let manifest: ThemeManifest =
-            serde_json::from_slice(&raw).map_err(|e| format!("parse komari-theme.json: {e}"))?;
+            serde_json::from_slice(&raw).map_err(|e| format!("parse {name}: {e}"))?;
         manifest.validate()?;
         if !staging.join("dist/index.html").is_file() {
             return Err("theme archive is missing dist/index.html".into());

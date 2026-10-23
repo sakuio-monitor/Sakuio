@@ -588,6 +588,29 @@ impl ThemeService {
         self.read_index(&active).await
     }
 
+    /// Reads the admin SPA bundled with the active Komari theme.
+    /// Komari themes ship `dist/admin-app/`; serve it below `/admin`.
+    pub async fn read_admin_asset(&self, relative: &str) -> Option<ThemeFile> {
+        let active = self.active().await;
+        if active == DEFAULT_SHORT {
+            return None;
+        }
+        let relative = relative.trim_start_matches('/');
+        if relative.split('/').any(|segment| segment.starts_with('.')) {
+            return None;
+        }
+        let path = if relative.is_empty() {
+            "dist/admin-app/index.html".to_string()
+        } else {
+            format!("dist/admin-app/{relative}")
+        };
+        let bytes = self.store.read_file(&active, &path)?;
+        Some(ThemeFile {
+            bytes,
+            mime: mime_for(&path),
+        })
+    }
+
     pub async fn read_theme_asset(&self, short: &str, relative: &str) -> Option<ThemeFile> {
         if short != DEFAULT_SHORT && !valid_short(short) {
             return None;

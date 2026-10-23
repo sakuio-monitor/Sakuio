@@ -69,6 +69,112 @@ pub struct AppState {
     pub ddns: Arc<ddns::DdnsService>,
 }
 
+fn read_local_admin_file(relative: &str) -> Option<Vec<u8>> {
+    let relative = relative.trim_start_matches('/');
+    if relative.split('/').any(|segment| segment == ".." || segment.starts_with('.')) {
+        return None;
+    }
+    let configured = std::env::var("SAKUIO_ADMIN_DIR").ok();
+    let candidates = [
+        configured.as_deref(),
+        Some("./data/admin-app"),
+        Some("./admin-app"),
+        Some("../Sakuio-frontend/apps/admin/dist"),
+    ];
+    for directory in candidates.into_iter().flatten() {
+        let root = std::path::PathBuf::from(directory);
+        let candidate = root.join(relative);
+        let Ok(real) = std::fs::canonicalize(&candidate) else {
+            continue;
+        };
+        let Ok(base) = std::fs::canonicalize(&root) else {
+            continue;
+        };
+        if real.starts_with(&base) && real.is_file() {
+            if let Ok(bytes) = std::fs::read(real) {
+                return Some(bytes);
+            }
+        }
+    }
+    None
+}
+
+fn mime_for_admin(path: &str) -> String {
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    match extension.to_ascii_lowercase().as_str() {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" | "map" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+/// Serves the admin SPA shipped inside the active theme's `dist/admin-app`,
+/// or a standalone admin build under `SAKUIO_ADMIN_DIR` / `data/admin-app`.
+/// This is what `/admin/dashboard` and Komari theme login redirects target.
+async fn admin_serve(state: &AppState, path: &str, method: &Method) -> Option<Response> {
+    let relative = path.strip_prefix("/admin").unwrap_or(path);
+    let relative = relative.trim_start_matches('/');
+    let requested = if relative.is_empty() { "index.html" } else { relative };
+    let mut file = state.theme.read_admin_asset(requested).await;
+    if file.is_none() {
+        if let Some(bytes) = read_local_admin_file(requested) {
+            file = Some(theme::ThemeFile {
+                bytes,
+                mime: mime_for_admin(requested),
+            });
+        }
+    }
+    if file.is_none() && !relative.contains('.') {
+        file = state.theme.read_admin_asset("index.html").await;
+        if file.is_none() {
+            if let Some(bytes) = read_local_admin_file("index.html") {
+                file = Some(theme::ThemeFile {
+                    bytes,
+                    mime: "text/html; charset=utf-8".into(),
+                });
+            }
+        }
+    }
+    let Some(file) = file else {
+        return None;
+    };
+    let cache = if file.mime.starts_with("text/html") {
+        "no-cache"
+    } else if path.contains('.') {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    let body = if *method == Method::HEAD {
+        axum::body::Body::empty()
+    } else {
+        axum::body::Body::from(file.bytes)
+    };
+    Some(
+        (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, file.mime),
+                (header::CACHE_CONTROL, cache.to_string()),
+            ],
+            body,
+        )
+            .into_response(),
+    )
+}
+
 /// Serves the active Komari theme and its SPA fallback.
 /// 提供当前 Komari 主题及其 SPA 回退。
 async fn theme_serve(State(state): State<AppState>, request: Request) -> Response {
@@ -76,11 +182,19 @@ async fn theme_serve(State(state): State<AppState>, request: Request) -> Respons
         return StatusCode::NOT_FOUND.into_response();
     }
     let path = request.uri().path().to_string();
-    if path == "/api"
-        || path.starts_with("/api/")
-        || path.starts_with("/admin")
-        || path.starts_with("/terminal")
-    {
+    if path == "/api" || path.starts_with("/api/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if path == "/admin" {
+        return axum::response::Redirect::to("/admin/").into_response();
+    }
+    if path.starts_with("/admin/") {
+        if let Some(response) = admin_serve(&state, &path, &request.method().clone()).await {
+            return response;
+        }
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if path.starts_with("/terminal") {
         return StatusCode::NOT_FOUND.into_response();
     }
     let (file, page) = if let Some(rest) = path.strip_prefix("/themes/") {
@@ -392,6 +506,8 @@ async fn main() -> anyhow::Result<()> {
             "/api/admin/themes/:short",
             axum::routing::delete(theme_api::delete),
         )
+        .route("/api/admin/account/username", post(auth::change_username))
+        .route("/api/admin/account/password", post(auth::change_password))
         .route("/api/admin/2fa/setup", post(auth::setup_2fa))
         .route("/api/admin/2fa/enable", post(auth::enable_2fa))
         .route("/api/admin/2fa/disable", post(auth::disable_2fa))
