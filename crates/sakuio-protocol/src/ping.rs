@@ -29,3 +29,39 @@ pub struct AgentPingResultParams {
 pub const METHOD_AGENT_PING: &str = "agent.ping";
 pub const METHOD_AGENT_PING_BATCH: &str = "agent.pingBatch";
 pub const METHOD_AGENT_PING_RESULT: &str = "agent.pingResult";
+pub const METHOD_AGENT_PING_BATCH_RESULT: &str = "agent.pingBatchResult";
+
+/// `agent.pingBatchResult` payload; one frame carries all results from a batch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPingBatchResultParams {
+    pub results: Vec<AgentPingResultParams>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ping_batch_result_round_trips() {
+        let params = AgentPingBatchResultParams {
+            results: vec![
+                AgentPingResultParams {
+                    task_id: 1,
+                    ping_type: "icmp".into(),
+                    value: 12,
+                    finished_at: "2026-10-24T00:00:00Z".into(),
+                },
+                AgentPingResultParams {
+                    task_id: 2,
+                    ping_type: "tcp".into(),
+                    value: -1,
+                    finished_at: "2026-10-24T00:00:01Z".into(),
+                },
+            ],
+        };
+        let encoded = serde_json::to_value(&params).unwrap();
+        let decoded: AgentPingBatchResultParams = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.results.len(), 2);
+        assert_eq!(decoded.results[1].task_id, 2);
+    }
+}

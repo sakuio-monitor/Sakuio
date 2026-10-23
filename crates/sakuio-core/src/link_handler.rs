@@ -5,9 +5,9 @@ use sakuio_db::DbPool;
 use sakuio_db::{ExecRepository, PingRepository};
 use sakuio_metric::MetricWriter;
 use sakuio_protocol::{
-    AgentPingResultParams, BasicInfoParams, ControlMessage, ControlOp, HelloParams,
+    AgentPingBatchResultParams, AgentPingResultParams, BasicInfoParams, ControlMessage, ControlOp, HelloParams,
     RemoteExecResultParams, SyncReqParams, SyncRespParams, TelemetryBatch, WelcomeParams,
-    METHOD_AGENT_PING_RESULT, METHOD_REMOTE_EXEC_RESULT,
+    METHOD_AGENT_PING_BATCH_RESULT, METHOD_AGENT_PING_RESULT, METHOD_REMOTE_EXEC_RESULT,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -361,6 +361,19 @@ impl LinkSessionHandler {
             .get("method")
             .and_then(|v| v.as_str())
             .unwrap_or(METHOD_AGENT_PING_RESULT);
+        if method == METHOD_AGENT_PING_BATCH_RESULT {
+            let raw = payload
+                .get("results")
+                .or_else(|| payload.get("payload"))
+                .cloned()
+                .unwrap_or_else(|| payload.clone());
+            let params: AgentPingBatchResultParams = serde_json::from_value(raw)
+                .map_err(|e| format!("ping batch result params: {e}"))?;
+            for result in params.results {
+                self.insert_ping_result(node_uuid, result).await?;
+            }
+            return Ok(());
+        }
         if method != METHOD_AGENT_PING_RESULT {
             return Ok(());
         }
@@ -375,6 +388,14 @@ impl LinkSessionHandler {
             )
             .map_err(|e| e.to_string())?
         };
+        self.insert_ping_result(node_uuid, params).await
+    }
+
+    async fn insert_ping_result(
+        &self,
+        node_uuid: &str,
+        params: AgentPingResultParams,
+    ) -> Result<(), String> {
         let observed_at_ms = chrono::DateTime::parse_from_rfc3339(&params.finished_at)
             .map(|t| t.timestamp_millis())
             .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis());
