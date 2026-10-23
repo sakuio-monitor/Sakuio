@@ -9,6 +9,9 @@ authors.workspace = true
 name = "sakuio-server"
 path = "src/main.rs"
 
+[features]
+embedded-admin = ["dep:include_dir"]
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -18,6 +21,7 @@ cookie = "0.18"
 uuid.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+include_dir = { version = "0.7", optional = true }
 hex.workspace = true
 mime_guess.workspace = true
 reqwest.workspace = true

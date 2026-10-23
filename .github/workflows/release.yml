@@ -16,22 +16,69 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  frontend:
+    name: Frontend (admin + theme)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: sakuio-monitor/Sakuio-frontend
+          path: frontend
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+      - name: Build admin SPA
+        working-directory: frontend/apps/admin
+        run: bunx vite build
+      - name: Build public theme package
+        working-directory: frontend/apps/public
+        run: bunx vite build
+      - name: Name theme release asset
+        shell: bash
+        run: |
+          THEME_ZIP="$(ls frontend/apps/public/sakuio-theme-build-*.zip | head -1)"
+          cp "$THEME_ZIP" "sakuio-theme-${GITHUB_REF_NAME}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-bundle
+          path: |
+            frontend/apps/admin/dist
+            sakuio-theme-*.zip
+          if-no-files-found: error
+
   build:
     name: ${{ matrix.asset }}
+    needs: frontend
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux uses static musl, same strategy as Sakuio-agent.
+          # Linux: static musl, same target family as Sakuio-agent.
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, asset: sakuio-server-linux-amd64, zig: true }
+          - { os: ubuntu-24.04, target: i686-unknown-linux-musl, asset: sakuio-server-linux-386, zig: true }
           - { os: ubuntu-24.04, target: aarch64-unknown-linux-musl, asset: sakuio-server-linux-arm64, zig: true }
-          - { os: macos-14, target: aarch64-apple-darwin, asset: sakuio-server-darwin-arm64, zig: false }
-          - { os: macos-13, target: x86_64-apple-darwin, asset: sakuio-server-darwin-amd64, zig: false }
+          - { os: ubuntu-24.04, target: armv7-unknown-linux-musleabihf, asset: sakuio-server-linux-arm, zig: true }
+          - { os: ubuntu-24.04, target: loongarch64-unknown-linux-musl, asset: sakuio-server-linux-loong64, zig: true }
+          - { os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, asset: sakuio-server-linux-riscv64, zig: true }
+          # Windows native.
           - { os: windows-2022, target: x86_64-pc-windows-msvc, asset: sakuio-server-windows-amd64.exe, zig: false }
+          - { os: windows-2022, target: i686-pc-windows-msvc, asset: sakuio-server-windows-386.exe, zig: false }
+          - { os: windows-2022, target: aarch64-pc-windows-msvc, asset: sakuio-server-windows-arm64.exe, zig: false }
 
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-bundle
+          path: frontend-bundle
+
+      - name: Prepare embedded admin
+        shell: bash
+        run: cp -R frontend-bundle/frontend/apps/admin/dist crates/sakuio-server/admin-dist
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -58,7 +105,7 @@ jobs:
         shell: bash
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
-        run: cargo zigbuild --release --target ${{ matrix.target }} -p sakuio-server
+        run: cargo zigbuild --release --target ${{ matrix.target }} --features embedded-admin -p sakuio-server
 
       - name: Verify static binary
         if: matrix.zig
@@ -74,7 +121,7 @@ jobs:
       - name: Build (native)
         if: ${{ !matrix.zig }}
         shell: bash
-        run: cargo build --release --target ${{ matrix.target }} -p sakuio-server
+        run: cargo build --release --target ${{ matrix.target }} --features embedded-admin -p sakuio-server
 
       - name: Collect asset
         shell: bash
@@ -96,31 +143,9 @@ jobs:
             ${{ matrix.asset }}.sha256
           if-no-files-found: error
 
-  build-freebsd:
-    name: sakuio-server-freebsd-amd64
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build on FreeBSD
-        uses: vmactions/freebsd-vm@v1
-        with:
-          usesh: true
-          prepare: pkg install -y rust
-          run: |
-            cargo build --release -p sakuio-server
-            cp target/release/sakuio-server sakuio-server-freebsd-amd64
-            sha256 sakuio-server-freebsd-amd64 > sakuio-server-freebsd-amd64.sha256
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sakuio-server-freebsd-amd64
-          path: |
-            sakuio-server-freebsd-amd64
-            sakuio-server-freebsd-amd64.sha256
-          if-no-files-found: error
-
   release:
     name: Publish release
-    needs: [build, build-freebsd]
+    needs: [frontend, build]
     runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/v')
     steps:

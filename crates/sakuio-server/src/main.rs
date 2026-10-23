@@ -46,6 +46,9 @@ use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
 
+#[cfg(feature = "embedded-admin")]
+static EMBEDDED_ADMIN: include_dir::Dir<'static> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/admin-dist");
+
 #[global_allocator]
 static GLOBAL_ALLOCATOR: alloc_metrics::TrackingAllocator = alloc_metrics::TrackingAllocator;
 
@@ -97,6 +100,10 @@ fn read_local_admin_file(relative: &str) -> Option<Vec<u8>> {
                 return Some(bytes);
             }
         }
+    }
+    #[cfg(feature = "embedded-admin")]
+    if let Some(file) = EMBEDDED_ADMIN.get_file(relative) {
+        return Some(file.contents().to_vec());
     }
     None
 }

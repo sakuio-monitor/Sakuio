@@ -180,6 +180,36 @@ CONFIGEOF
   chmod 600 "$INSTALL_DIR/config.yaml"
 fi
 
+# ---- default theme ---------------------------------------------------------
+# The public theme is published as a separate release asset. It is unpacked
+# before the server starts so the first initialization can activate it.
+THEME_ASSET="sakuio-theme-${VERSION}.zip"
+THEME_URL="${BASE}/${THEME_ASSET}"
+THEME_DIR="$INSTALL_DIR/data/theme/SakuioTheme"
+THEME_TMP="$(mktemp)"
+if command -v curl >/dev/null 2>&1; then
+  if curl -fL --retry 3 -o "$THEME_TMP" "$THEME_URL" 2>/dev/null; then
+    mkdir -p "$THEME_DIR"
+    if command -v unzip >/dev/null 2>&1; then
+      unzip -q -o "$THEME_TMP" -d "$THEME_DIR"
+    elif command -v python3 >/dev/null 2>&1; then
+      python3 -m zipfile -e "$THEME_TMP" "$THEME_DIR"
+    else
+      echo "warning: theme downloaded but unzip/python3 is unavailable" >&2
+    fi
+    if [[ -f "$THEME_DIR/sakuio-theme.json" || -f "$THEME_DIR/komari-theme.json" ]]; then
+      echo "==> installed default theme SakuioTheme"
+    else
+      echo "warning: theme archive has no manifest" >&2
+    fi
+  else
+    echo "warning: default theme package not found; server will start without it" >&2
+  fi
+else
+  echo "warning: curl is unavailable; skipped default theme" >&2
+fi
+rm -f "$THEME_TMP"
+
 # ---- service definition -----------------------------------------------------
 if [[ "$is_darwin" -eq 1 ]]; then
   PLIST="/Library/LaunchDaemons/$SERVICE_NAME.plist"

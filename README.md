@@ -66,6 +66,8 @@ The installer asks for:
 - install directory (default `/opt/sakuio`)
 - optional GitHub proxy URL
 
+The installer also downloads and unpacks the default theme into `/opt/sakuio/data/theme/SakuioTheme`, and the first setup activates it.
+
 Then `sudo sakuio` opens a menu for start/stop/restart, logs, updates, username, password, and TOTP reset.
 
 ### Environment overrides

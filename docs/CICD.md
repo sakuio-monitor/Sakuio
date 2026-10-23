@@ -98,11 +98,18 @@ CI 中访问。
 | 目标 | 资产名 |
 |---|---|
 | linux x86_64 | `sakuio-server-linux-amd64`（static musl） |
+| linux i686 | `sakuio-server-linux-386`（static musl） |
 | linux aarch64 | `sakuio-server-linux-arm64`（static musl） |
-| darwin x86_64 | `sakuio-server-darwin-amd64` |
-| darwin arm64 | `sakuio-server-darwin-arm64` |
+| linux armv7 | `sakuio-server-linux-arm`（static musl） |
+| linux loongarch64 | `sakuio-server-linux-loong64`（static musl） |
+| linux riscv64 | `sakuio-server-linux-riscv64`（static musl） |
 | windows x86_64 | `sakuio-server-windows-amd64.exe` |
-| freebsd x86_64 | `sakuio-server-freebsd-amd64` |
+| windows i686 | `sakuio-server-windows-386.exe` |
+| windows arm64 | `sakuio-server-windows-arm64.exe` |
+
+同一 Release 还包含管理端构建产物和 `sakuio-theme-<tag>.zip`；服务端以
+`embedded-admin` feature 嵌入管理端静态文件，安装脚本下载主题包到
+`/opt/sakuio/data/theme/SakuioTheme`。
 
 每个资产同时发布 `.sha256`；安装脚本会校验（Release 提供时）。
 

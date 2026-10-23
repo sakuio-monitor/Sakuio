@@ -186,6 +186,11 @@ pub async fn install_complete(
             if let Err(e) = crate::site_settings::save_to_pool(target, &settings).await {
                 tracing::warn!(error = %e, "save initial site settings failed");
             }
+            // New installations use the Sakuio theme by default when the
+            // installer unpacked it into data/theme/SakuioTheme.
+            if state.theme.apply("SakuioTheme").await.is_ok() {
+                tracing::info!("default theme activated: SakuioTheme");
+            }
             crate::audit::record_auth_event_to(
                 &state.geo,
                 target,

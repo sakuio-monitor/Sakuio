@@ -66,6 +66,8 @@ curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.
 - 安装目录，默认 `/opt/sakuio`
 - GitHub 加速站 URL，可留空
 
+安装脚本还会下载并解压默认主题到 `/opt/sakuio/data/theme/SakuioTheme`，首次初始化后自动启用该主题。
+
 然后 `sudo sakuio` 会打开数字菜单，可启动、停止、重启、查看日志、更新程序、修改用户名、修改密码、关闭 TOTP。
 
 ### 环境变量覆盖

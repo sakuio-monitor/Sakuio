@@ -38,3 +38,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Embedded admin build input (generated in CI)
+crates/sakuio-server/admin-dist/
