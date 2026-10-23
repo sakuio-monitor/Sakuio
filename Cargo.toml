@@ -13,10 +13,14 @@ members = [
 default-members = ["crates/sakuio-server"]
 
 [workspace.package]
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
 license = "MIT"
 authors = ["Sakuio Contributors"]
+
+[workspace.lints.rust]
+# Rust 1.97 forwards GNU ld's misleading -O warning as a lint.
+linker_messages = "allow"
 
 [workspace.dependencies]
 anyhow = "1"

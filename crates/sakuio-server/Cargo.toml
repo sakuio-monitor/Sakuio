@@ -9,6 +9,9 @@ authors.workspace = true
 name = "sakuio-server"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [features]
 embedded-admin = ["dep:include_dir"]
 

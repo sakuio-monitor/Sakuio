@@ -19,10 +19,10 @@ fn record_alloc(size: usize) {
 
 fn record_dealloc(size: usize) {
     let size = size as u64;
-    let _ = LIVE_BYTES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+    let _ = LIVE_BYTES.try_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
         Some(live.saturating_sub(size))
     });
-    let _ = LIVE_OBJECTS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+    let _ = LIVE_OBJECTS.try_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
         Some(live.saturating_sub(1))
     });
 }
@@ -62,7 +62,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
                 PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
             } else {
                 let delta = (old_size - new_size) as u64;
-                let _ = LIVE_BYTES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+                let _ = LIVE_BYTES.try_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
                     Some(live.saturating_sub(delta))
                 });
             }
