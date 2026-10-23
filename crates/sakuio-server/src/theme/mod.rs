@@ -154,28 +154,12 @@ impl ThemeService {
         &self.jobs
     }
 
-    /// Lists installed themes plus the virtual built-in default theme.
-    /// 列出已安装主题以及内置的默认主题。
+    /// Lists installed themes. The internal `default` fallback is not exposed
+    /// as a selectable theme, so the built-in placeholder never appears next to
+    /// an installed theme.
     pub async fn list(&self) -> Vec<ThemeSummary> {
         let active = self.active().await;
-        let mut rows = vec![ThemeSummary {
-            short: DEFAULT_SHORT.into(),
-            name: "Sakuio Default".into(),
-            description: "Built-in placeholder theme".into(),
-            version: env!("CARGO_PKG_VERSION").into(),
-            author: "Sakuio".into(),
-            url: String::new(),
-            preview: String::new(),
-            preview_url: None,
-            active: active == DEFAULT_SHORT,
-            installed: true,
-            installed_version: Some(env!("CARGO_PKG_VERSION").into()),
-            source: None,
-            configuration_type: configuration::MANAGED.into(),
-            config_items: 0,
-            configuration_name: Value::Null,
-            configuration_icon: String::new(),
-        }];
+        let mut rows = Vec::new();
         for theme in self.store.list() {
             rows.push(self.summary(&theme, &active));
         }
