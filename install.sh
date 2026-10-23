@@ -24,6 +24,8 @@ SERVICE_NAME="sakuio"
 GITHUB_PROXY="${GITHUB_PROXY:-}"
 UNINSTALL=0
 PURGE=0
+INTERACTIVE=0
+[[ $# -eq 0 ]] && INTERACTIVE=1
 
 usage() { sed -n '2,22p' "$0"; exit 0; }
 
@@ -44,6 +46,31 @@ done
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "error: run this installer as root (use sudo)" >&2
   exit 1
+fi
+
+# Short command (`curl ... | sudo bash`) asks only for the essentials.
+# When stdin is the script pipe, read prompts from /dev/tty.
+ask_tty() {
+  local prompt="$1" default="$2" answer=""
+  if [[ -r /dev/tty ]]; then
+    read -r -p "$prompt" answer < /dev/tty || true
+  fi
+  printf '%s' "${answer:-$default}"
+}
+
+if [[ "$INTERACTIVE" -eq 1 ]]; then
+  port_input="$(ask_tty "监听端口 [8555]: " "8555")"
+  if [[ ! "$port_input" =~ ^[0-9]+$ ]] || (( port_input < 1 || port_input > 65535 )); then
+    echo "error: invalid port: $port_input" >&2
+    exit 1
+  fi
+  LISTEN="0.0.0.0:${port_input}"
+
+  dir_input="$(ask_tty "安装目录 [/opt/sakuio]: " "/opt/sakuio")"
+  INSTALL_DIR="${dir_input:-/opt/sakuio}"
+
+  proxy_input="$(ask_tty "GitHub 加速站 URL（留空使用官方）: " "")"
+  [[ -n "$proxy_input" ]] && GITHUB_PROXY="$proxy_input"
 fi
 
 is_darwin=0

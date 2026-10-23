@@ -57,12 +57,17 @@ http://0.0.0.0:8555
 ### 一键安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.sh \
-  | sudo bash -s -- --listen 0.0.0.0:8555
+curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.sh | sudo bash
 sudo sakuio
 ```
 
-`sudo sakuio` 会打开数字菜单，可启动、停止、重启、查看日志、更新程序、修改用户名、修改密码、关闭 TOTP。
+安装脚本会依次询问：
+
+- 监听端口，默认 `8555`
+- 安装目录，默认 `/opt/sakuio`
+- GitHub 加速站 URL，可留空
+
+然后 `sudo sakuio` 会打开数字菜单，可启动、停止、重启、查看日志、更新程序、修改用户名、修改密码、关闭 TOTP。
 
 ### 环境变量覆盖
 

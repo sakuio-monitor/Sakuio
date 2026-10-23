@@ -109,8 +109,7 @@ CI 中访问。
 一键安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.sh \
-  | sudo bash -s -- --listen 0.0.0.0:8555
+curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.sh | sudo bash
 sudo sakuio
 ```
 

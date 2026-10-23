@@ -57,12 +57,17 @@ On first launch Sakuio creates `config.yaml` next to the executable with a defau
 ### One-line install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.sh \
-  | sudo bash -s -- --listen 0.0.0.0:8555
+curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio/main/install.sh | sudo bash
 sudo sakuio
 ```
 
-`sudo sakuio` opens a menu for start/stop/restart, logs, updates, username, password, and TOTP reset.
+The installer asks for:
+
+- listen port (default `8555`)
+- install directory (default `/opt/sakuio`)
+- optional GitHub proxy URL
+
+Then `sudo sakuio` opens a menu for start/stop/restart, logs, updates, username, password, and TOTP reset.
 
 ### Environment overrides
 
