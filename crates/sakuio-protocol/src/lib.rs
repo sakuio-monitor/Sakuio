@@ -15,7 +15,7 @@ pub use control::{
 };
 pub use sktl::{decode_sktl, encode_sktl, SkltPayload, SKTL_MAGIC};
 pub use ping::{
-    AgentPingParams, AgentPingResultParams, METHOD_AGENT_PING, METHOD_AGENT_PING_RESULT,
+    AgentPingBatchParams, AgentPingParams, AgentPingResultParams, METHOD_AGENT_PING, METHOD_AGENT_PING_BATCH, METHOD_AGENT_PING_RESULT,
 };
 pub use remote::{
     BoardRelaySpec, RemoteExecOpen, RemoteExecResultParams, RemoteFileCommand, RemoteFileResult,

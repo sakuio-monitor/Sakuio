@@ -11,6 +11,12 @@ pub struct AgentPingParams {
     pub target: String,
 }
 
+/// `agent.pingBatch` command payload; executes several ping tasks in one push.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPingBatchParams {
+    pub tasks: Vec<AgentPingParams>,
+}
+
 /// `agent.pingResult` payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentPingResultParams {
@@ -21,4 +27,5 @@ pub struct AgentPingResultParams {
 }
 
 pub const METHOD_AGENT_PING: &str = "agent.ping";
+pub const METHOD_AGENT_PING_BATCH: &str = "agent.pingBatch";
 pub const METHOD_AGENT_PING_RESULT: &str = "agent.pingResult";
