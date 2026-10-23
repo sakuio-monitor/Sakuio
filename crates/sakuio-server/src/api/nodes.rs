@@ -8,7 +8,10 @@ use axum::{
 };
 use sakuio_board::BoardStateStore;
 use sakuio_db::{AdminClientPatch, ClientRepository, NewClient, PingRepository};
-use sakuio_protocol::{AgentUpdateParams, ConfigParams, ControlMessage, ControlOp, AGENT_LATEST_VERSION, METHOD_AGENT_UPDATE};
+use sakuio_protocol::{
+    AgentUpdateParams, ConfigParams, ControlMessage, ControlOp, AGENT_VERSION_RANGE_MAX,
+    METHOD_AGENT_UPDATE,
+};
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::time::Duration;
@@ -423,8 +426,22 @@ pub async fn batch_set_group(
 
 /// Current agent release supported by this board.
 /// 当前面板支持的最新 Agent 版本。
-pub async fn agent_version(_user: crate::auth::AdminUser) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "version": AGENT_LATEST_VERSION }))
+pub async fn agent_version(_user: crate::auth::AdminUser) -> impl IntoResponse {
+    match crate::agent_version::latest_supported(AGENT_VERSION_RANGE_MAX).await {
+        Ok(version) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "version": version,
+                "board_max": AGENT_VERSION_RANGE_MAX,
+            })),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "message": error })),
+        )
+            .into_response(),
+    }
 }
 
 /// Ask a live agent to self-update immediately.
@@ -434,8 +451,25 @@ pub async fn update_admin_agent(
     Path(uuid): Path<String>,
     _user: crate::auth::AdminUser,
 ) -> impl IntoResponse {
+    let target_version = match crate::agent_version::latest_supported(AGENT_VERSION_RANGE_MAX).await {
+        Ok(Some(version)) => version,
+        Ok(None) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "message": "当前兼容区间内没有可用的 Agent Release" })),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "message": error })),
+            )
+                .into_response();
+        }
+    };
     let payload = serde_json::to_value(AgentUpdateParams {
-        target_version: Some(AGENT_LATEST_VERSION.to_string()),
+        target_version: Some(target_version.clone()),
     })
     .unwrap_or(serde_json::Value::Null);
     let message = ControlMessage::new(
@@ -446,10 +480,10 @@ pub async fn update_admin_agent(
         }),
     );
     if state.command_bus.push(&uuid, message).await {
-        tracing::info!(uuid = %uuid, target = AGENT_LATEST_VERSION, "agent update command sent");
+        tracing::info!(uuid = %uuid, target = %target_version, "agent update command sent");
         (
             StatusCode::ACCEPTED,
-            Json(serde_json::json!({ "success": true, "target_version": AGENT_LATEST_VERSION })),
+            Json(serde_json::json!({ "success": true, "target_version": target_version })),
         )
             .into_response()
     } else {

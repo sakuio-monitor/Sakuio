@@ -104,10 +104,6 @@ pub struct AgentVersionRange {
 pub const AGENT_VERSION_RANGE_MIN: &str = "0.0.1";
 pub const AGENT_VERSION_RANGE_MAX: &str = "0.2.5";
 
-/// Latest agent release supported by this board.
-/// 当前面板支持的最新 Agent 版本；用于列表更新提示和手动更新指令。
-pub const AGENT_LATEST_VERSION: &str = "0.0.5";
-
 /// Method for board-triggered agent self-update.
 /// 面板触发 Agent 自更新的方法名。
 pub const METHOD_AGENT_UPDATE: &str = "agent.update";

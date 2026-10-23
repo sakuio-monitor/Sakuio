@@ -1,6 +1,7 @@
 mod alloc_metrics;
 mod api;
 mod audit;
+mod agent_version;
 mod audit_api;
 mod auth;
 mod billing_watcher;
