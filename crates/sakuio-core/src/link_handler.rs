@@ -362,13 +362,10 @@ impl LinkSessionHandler {
             .and_then(|v| v.as_str())
             .unwrap_or(METHOD_AGENT_PING_RESULT);
         if method == METHOD_AGENT_PING_BATCH_RESULT {
-            let raw = payload
-                .get("results")
-                .or_else(|| payload.get("payload"))
-                .cloned()
-                .unwrap_or_else(|| payload.clone());
-            let params: AgentPingBatchResultParams = serde_json::from_value(raw)
-                .map_err(|e| format!("ping batch result params: {e}"))?;
+            // Agent sends `{"method": ..., "results": [...]}`, while the
+            // struct expects `{"results": [...]}`. Do not deserialize the
+            // array itself, or every batch result is silently rejected.
+            let params = parse_ping_batch_result(payload)?;
             for result in params.results {
                 self.insert_ping_result(node_uuid, result).await?;
             }
@@ -412,6 +409,22 @@ impl LinkSessionHandler {
     }
 }
 
+fn parse_ping_batch_result(
+    payload: &serde_json::Value,
+) -> Result<AgentPingBatchResultParams, String> {
+    if let Some(results) = payload.get("results") {
+        return serde_json::from_value(serde_json::json!({ "results": results }))
+            .map_err(|e| format!("ping batch result params: {e}"));
+    }
+    serde_json::from_value(
+        payload
+            .get("payload")
+            .cloned()
+            .unwrap_or_else(|| payload.clone()),
+    )
+    .map_err(|e| format!("ping batch result params: {e}"))
+}
+
 fn audit_presence(db: &DbPool, node_uuid: &str, online: bool, reason: &'static str) {
     let db = db.clone();
     let node_uuid = node_uuid.to_string();
@@ -449,4 +462,22 @@ fn audit_presence(db: &DbPool, node_uuid: &str, online: bool, reason: &'static s
             tracing::warn!(node_uuid = %node_uuid, error = %error, "presence audit write failed");
         }
     });
+}
+
+#[cfg(test)]
+mod ping_batch_tests {
+    use super::*;
+
+    #[test]
+    fn parses_agent_batch_result_envelope() {
+        let payload = serde_json::json!({
+            "method": METHOD_AGENT_PING_BATCH_RESULT,
+            "results": [
+                {"task_id": 7, "ping_type": "icmp", "value": 12, "finished_at": "2026-10-24T00:00:00Z"}
+            ]
+        });
+        let parsed = parse_ping_batch_result(&payload).expect("batch result");
+        assert_eq!(parsed.results.len(), 1);
+        assert_eq!(parsed.results[0].task_id, 7);
+    }
 }
