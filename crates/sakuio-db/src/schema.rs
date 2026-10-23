@@ -748,6 +748,7 @@ pub async fn ensure_metric_schema(pool: &DbPool, prefix: &str) -> Result<(), sql
         let physical = format!("{prefix}{suffix}");
         ensure_table(pool, kind, table, &physical, &prefix).await?;
     }
+    crate::metric_storage::ensure_timescale(pool, &prefix).await?;
     Ok(())
 }
 

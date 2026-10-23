@@ -13,6 +13,7 @@ mod maintenance;
 mod notification;
 mod ping;
 mod schema;
+mod metric_storage;
 mod settings;
 
 pub use admin_auth::{
