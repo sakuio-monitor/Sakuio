@@ -106,6 +106,26 @@ fn downsample_rows(rows: Vec<serde_json::Value>, budget: i64) -> Vec<serde_json:
     rows.into_iter().step_by(step.max(1)).collect()
 }
 
+async fn query_buckets(
+    store: &sakuio_metric::MetricStore,
+    uuid: &str,
+    metric_key: Option<&str>,
+    bucket_seconds: i64,
+    since_ms: i64,
+    until_ms: i64,
+    limit: i64,
+) -> Result<Vec<sakuio_metric::BucketRow>, (i32, &'static str)> {
+    match metric_key {
+        Some(key) => {
+            store
+                .list_buckets_for_metric(uuid, key, bucket_seconds, since_ms, until_ms, limit)
+                .await
+        }
+        None => store.list_buckets(uuid, bucket_seconds, since_ms, until_ms, limit).await,
+    }
+    .map_err(|_| (-32603, "Internal error"))
+}
+
 pub async fn public_get_records_by_uuid(
     state: &AppState,
     params: Option<&Value>,
@@ -147,19 +167,27 @@ pub async fn public_get_records_by_uuid(
     } else {
         3600
     };
-    let bucket_seconds = budget_bucket(hours * 3_600_000, preferred, budget);
+    let mut bucket_seconds = budget_bucket(hours * 3_600_000, preferred, budget);
     let fetch_limit = (budget * 4).clamp(100, 50_000);
 
     let store = state.metric.current_store().await;
-    let rows = match metric_key {
-        Some(key) => store
-            .list_buckets_for_metric(uuid, key, bucket_seconds, since_ms, until_ms, fetch_limit)
-            .await,
-        None => store
-            .list_buckets(uuid, bucket_seconds, since_ms, until_ms, fetch_limit)
-            .await,
+    let mut rows = query_buckets(&store, uuid, metric_key, bucket_seconds, since_ms, until_ms, fetch_limit).await?;
+    // A completed 1h bucket only exists after a full hour of samples. For a
+    // long range, fall back to the finest available window instead of
+    // returning an empty chart while 4h data exists.
+    if rows.is_empty() {
+        for fallback in [3600i64, 300, 60] {
+            if fallback >= bucket_seconds {
+                continue;
+            }
+            let candidate = query_buckets(&store, uuid, metric_key, fallback, since_ms, until_ms, fetch_limit).await?;
+            if !candidate.is_empty() {
+                bucket_seconds = fallback;
+                rows = candidate;
+                break;
+            }
+        }
     }
-    .map_err(|_| (-32603, "Internal error"))?;
 
     let mut records: Vec<Value> = buckets_to_records(uuid, bucket_seconds, &rows, since_ms);
     records = downsample_rows(records, budget);
@@ -377,12 +405,14 @@ fn buckets_to_records(
 ) -> Vec<Value> {
     use std::collections::BTreeMap;
     let mut by_slot: BTreeMap<i64, BTreeMap<&str, f64>> = BTreeMap::new();
+    let mut stats_by_slot: BTreeMap<i64, Vec<&sakuio_metric::BucketRow>> = BTreeMap::new();
     for row in rows {
         let slot = row.bucket_start_ms + bucket_seconds * 1000;
         by_slot
             .entry(slot)
             .or_default()
             .insert(metric_field(row.metric_key.as_str()), row.avg_val);
+        stats_by_slot.entry(slot).or_default().push(row);
     }
     by_slot
         .into_iter()
@@ -401,6 +431,13 @@ fn buckets_to_records(
                     _ => json!(*value as f32),
                 };
                 obj.insert((*field).into(), v);
+            }
+            for row in stats_by_slot.get(&slot).into_iter().flatten() {
+                let field = metric_field(row.metric_key.as_str());
+                obj.insert(format!("{field}_p50"), json!(row.p50_val as f32));
+                obj.insert(format!("{field}_p95"), json!(row.p95_val as f32));
+                obj.insert(format!("{field}_p99"), json!(row.p99_val as f32));
+                obj.insert(format!("{field}_variance"), json!(row.variance as f32));
             }
             obj.entry("cpu").or_insert_with(|| json!(cpu as f32));
             rec

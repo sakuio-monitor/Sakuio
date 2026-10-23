@@ -104,6 +104,11 @@ async fn migrate_buckets(
                 min_val,
                 max_val,
                 sample_count,
+                sum_sq: 0.0,
+                variance: 0.0,
+                p50_val: 0.0,
+                p95_val: 0.0,
+                p99_val: 0.0,
             });
         }
         target

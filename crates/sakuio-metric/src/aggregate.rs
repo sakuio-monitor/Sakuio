@@ -14,22 +14,101 @@ pub const WINDOW_SECONDS: [i64; 4] = [60, 300, 3600, 86_400];
 /// 各指标保留策略；0 表示禁用该指标持久化。
 pub type RetentionPolicy = std::collections::HashMap<String, i64>;
 
+#[derive(Clone, Copy)]
+struct P2Quantile {
+    q: f64,
+    n: i64,
+    marks: [f64; 5],
+    positions: [f64; 5],
+    desired: [f64; 5],
+}
+
+impl P2Quantile {
+    fn new(q: f64) -> Self {
+        Self { q, n: 0, marks: [0.0; 5], positions: [1.0, 2.0, 3.0, 4.0, 5.0], desired: [0.0; 5] }
+    }
+
+    fn add(&mut self, value: f64) {
+        if self.n < 5 {
+            self.marks[self.n as usize] = value;
+            self.n += 1;
+            if self.n == 5 {
+                self.marks.sort_by(|a, b| a.total_cmp(b));
+                self.positions = [1.0, 2.0, 3.0, 4.0, 5.0];
+                self.desired = [1.0, 1.0 + 2.0 * self.q, 1.0 + 4.0 * self.q, 3.0 + 2.0 * self.q, 5.0];
+            }
+            return;
+        }
+        let k = if value < self.marks[0] {
+            self.marks[0] = value;
+            0
+        } else if value >= self.marks[4] {
+            self.marks[4] = value;
+            3
+        } else {
+            (1..4).find(|&i| value < self.marks[i]).unwrap_or(3)
+        };
+        for i in (k + 1)..5 { self.positions[i] += 1.0; }
+        for i in 0..5 { self.desired[i] += [0.0, 0.5 * self.q, self.q, 0.5 + 0.5 * self.q, 1.0][i]; }
+        for i in 1..4 {
+            let d = self.desired[i] - self.positions[i];
+            let p = self.positions[i - 1];
+            let n = self.positions[i + 1];
+            let pp = self.positions[i];
+            if (d >= 1.0 && n - pp > 1.0) || (d <= -1.0 && pp - p > 1.0) {
+                let dir = if d > 0.0 { 1.0 } else { -1.0 };
+                let candidate = self.marks[i] + dir / (n - p) * (
+                    (pp - p + dir) * (self.marks[i + 1] - self.marks[i]) / (n - pp)
+                    + (n - pp - dir) * (self.marks[i] - self.marks[i - 1]) / (pp - p)
+                );
+                if candidate > self.marks[i - 1] && candidate < self.marks[i + 1] {
+                    self.marks[i] = candidate;
+                }
+                self.positions[i] += dir;
+            }
+        }
+    }
+
+    fn value(&self) -> f64 {
+        if self.n == 0 { return 0.0; }
+        if self.n < 5 {
+            let mut values = self.marks;
+            values.sort_by(|a, b| a.total_cmp(b));
+            let idx = ((self.n as f64 - 1.0) * self.q).round() as usize;
+            return values[idx.min((self.n - 1) as usize)];
+        }
+        let qpos = self.q * (self.n as f64 - 1.0) + 1.0;
+        for i in 1..5 {
+            if qpos <= self.positions[i] {
+                let span = self.positions[i] - self.positions[i - 1];
+                let frac = if span <= 0.0 { 0.0 } else { (qpos - self.positions[i - 1]) / span };
+                return self.marks[i - 1] + frac * (self.marks[i] - self.marks[i - 1]);
+            }
+        }
+        self.marks[4]
+    }
+}
+
 #[derive(Default)]
 struct WindowState {
     start_ms: i64,
     sums: HashMap<&'static str, f64>,
+    sums_sq: HashMap<&'static str, f64>,
     mins: HashMap<&'static str, f64>,
     maxs: HashMap<&'static str, f64>,
     counts: HashMap<&'static str, i64>,
+    quantiles: HashMap<&'static str, [P2Quantile; 3]>,
 }
 
 impl WindowState {
     fn reset(&mut self, start_ms: i64) {
         self.start_ms = start_ms;
         self.sums.clear();
+        self.sums_sq.clear();
         self.mins.clear();
         self.maxs.clear();
         self.counts.clear();
+        self.quantiles.clear();
     }
 }
 
@@ -81,6 +160,20 @@ impl BucketAggregator {
         rows
     }
 
+    /// Snapshot of all currently open windows without resetting them.
+    /// Used for periodic durability checkpoints.
+    pub fn snapshot(&self) -> Vec<BucketRow> {
+        let mut rows = Vec::new();
+        for (node, state) in &self.nodes {
+            for (window, win) in &state.windows {
+                if win.counts.values().sum::<i64>() > 0 {
+                    rows.extend(flush_window(node, *window, win));
+                }
+            }
+        }
+        rows
+    }
+
     /// Flushes the trailing (not yet rotated) buckets for all nodes.
     /// 冲刷所有节点尚未翻转的尾桶（关闭/迁移时调用）。
     pub fn flush_all(&mut self) -> Vec<BucketRow> {
@@ -100,13 +193,20 @@ impl BucketAggregator {
 fn traffic_delta(state: &mut NodeWindows, sample: &TelemetrySample) -> TrafficDelta {
     let now_totals = (sample.network.total_up, sample.network.total_down);
     let delta = if state.has_totals {
-        TrafficDelta {
-            down: sample
-                .network
-                .total_down
-                .saturating_sub(state.last_totals.1) as f64,
-            up: sample.network.total_up.saturating_sub(state.last_totals.0) as f64,
-        }
+        // A counter that goes backwards means the NIC / agent restarted. Count
+        // the new value as traffic since the reset instead of dropping the
+        // whole interval with saturating_sub.
+        let (up, down) = if sample.network.total_up < state.last_totals.0
+            || sample.network.total_down < state.last_totals.1
+        {
+            (sample.network.total_up as f64, sample.network.total_down as f64)
+        } else {
+            (
+                sample.network.total_up.saturating_sub(state.last_totals.0) as f64,
+                sample.network.total_down.saturating_sub(state.last_totals.1) as f64,
+            )
+        };
+        TrafficDelta { up, down }
     } else {
         TrafficDelta::default()
     };
@@ -117,6 +217,11 @@ fn traffic_delta(state: &mut NodeWindows, sample: &TelemetrySample) -> TrafficDe
 
 fn accumulate(win: &mut WindowState, def: &MetricDef, value: f64) {
     *win.sums.entry(def.key).or_default() += value;
+    *win.sums_sq.entry(def.key).or_default() += value * value;
+    let q = win.quantiles.entry(def.key).or_insert_with(|| {
+        [P2Quantile::new(0.50), P2Quantile::new(0.95), P2Quantile::new(0.99)]
+    });
+    for estimator in q.iter_mut() { estimator.add(value); }
     let min = win.mins.entry(def.key).or_insert(value);
     if value < *min {
         *min = value;
@@ -138,12 +243,21 @@ fn flush_window(node: &str, window: i64, win: &WindowState) -> Vec<BucketRow> {
             continue;
         }
         let sum = win.sums.get(def.key).copied().unwrap_or(0.0);
+        let avg = sum / count as f64;
+        let sum_sq = win.sums_sq.get(def.key).copied().unwrap_or(0.0);
+        let variance = (sum_sq / count as f64 - avg * avg).max(0.0);
+        let quantiles = win.quantiles.get(def.key);
         rows.push(BucketRow {
+            sum_sq: sum_sq,
+            p50_val: quantiles.map(|q| q[0].value()).unwrap_or(0.0),
+            p95_val: quantiles.map(|q| q[1].value()).unwrap_or(0.0),
+            p99_val: quantiles.map(|q| q[2].value()).unwrap_or(0.0),
+            variance,
             node_uuid: node.to_string(),
             metric_key: def.key.to_string(),
             bucket_seconds: window,
             bucket_start_ms: win.start_ms,
-            avg_val: sum / count as f64,
+            avg_val: avg,
             min_val: win.mins.get(def.key).copied().unwrap_or(0.0),
             max_val: win.maxs.get(def.key).copied().unwrap_or(0.0),
             sample_count: count,

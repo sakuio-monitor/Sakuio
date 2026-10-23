@@ -8,13 +8,27 @@ use serde::Serialize;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
+enum RecentSample {
+    Full(TelemetrySample),
+    Encoded { at: i64, bytes: Vec<u8> },
+}
+
+impl RecentSample {
+    fn observed_at_ms(&self) -> i64 {
+        match self {
+            Self::Full(sample) => sample.observed_at_ms,
+            Self::Encoded { at, .. } => *at,
+        }
+    }
+}
+
 #[derive(Default)]
 struct NodeState {
     presence: Option<Presence>,
     commands: Vec<CommandEnvelope>,
     next_cursor: u64,
     snapshot: Option<RuntimeSnapshot>,
-    recent: Vec<TelemetrySample>,
+    recent: Vec<RecentSample>,
 }
 
 /// In-process board state used when Redis is disabled.
@@ -130,16 +144,44 @@ impl BoardStateStore for MemoryBoardStore {
         let cutoff = chrono::Utc::now().timestamp_millis() - RECENT_TELEMETRY_MS;
         let mut guard = self.inner.write().await;
         let entry = guard.entry(node_uuid.to_string()).or_default();
+        let encode_before = chrono::Utc::now().timestamp_millis() - 60_000;
         for sample in samples {
             if sample.observed_at_ms < cutoff {
                 continue;
             }
+            let recent = if sample.observed_at_ms < encode_before {
+                let mut bytes = Vec::new();
+                match cbor4ii::serde::to_writer(&mut bytes, sample) {
+                    Ok(()) => RecentSample::Encoded {
+                        at: sample.observed_at_ms,
+                        bytes,
+                    },
+                    Err(_) => RecentSample::Full(sample.clone()),
+                }
+            } else {
+                RecentSample::Full(sample.clone())
+            };
             let pos = entry
                 .recent
-                .partition_point(|s| s.observed_at_ms < sample.observed_at_ms);
-            entry.recent.insert(pos, sample.clone());
+                .partition_point(|s| s.observed_at_ms() < sample.observed_at_ms);
+            entry.recent.insert(pos, recent);
         }
-        entry.recent.retain(|s| s.observed_at_ms >= cutoff);
+        // Compress older in-memory samples instead of keeping full structs for
+        // the whole ten-minute window.
+        for item in &mut entry.recent {
+            if let RecentSample::Full(sample) = item {
+                if sample.observed_at_ms < encode_before {
+                    let mut bytes = Vec::new();
+                    if cbor4ii::serde::to_writer(&mut bytes, sample).is_ok() {
+                        *item = RecentSample::Encoded {
+                            at: sample.observed_at_ms,
+                            bytes,
+                        };
+                    }
+                }
+            }
+        }
+        entry.recent.retain(|s| s.observed_at_ms() >= cutoff);
         Ok(())
     }
 
@@ -155,8 +197,13 @@ impl BoardStateStore for MemoryBoardStore {
         Ok(entry
             .recent
             .iter()
-            .filter(|s| s.observed_at_ms >= since_ms)
-            .cloned()
+            .filter(|s| s.observed_at_ms() >= since_ms)
+            .filter_map(|s| match s {
+                RecentSample::Full(sample) => Some(sample.clone()),
+                RecentSample::Encoded { bytes, .. } => {
+                    cbor4ii::serde::from_slice(bytes).ok()
+                }
+            })
             .collect())
     }
 }
@@ -191,7 +238,14 @@ impl MemoryBoardStore {
                     .unwrap_or(256);
             }
             stats.recent_samples += state.recent.len() as u64;
-            stats.estimated_bytes += (state.recent.len() as u64).saturating_mul(512);
+            stats.estimated_bytes += state
+                .recent
+                .iter()
+                .map(|s| match s {
+                    RecentSample::Full(_) => 512u64,
+                    RecentSample::Encoded { bytes, .. } => (bytes.len() as u64).saturating_add(32),
+                })
+                .sum::<u64>();
             for command in &state.commands {
                 stats.commands += 1;
                 stats.estimated_bytes += command.payload.to_string().len() as u64;

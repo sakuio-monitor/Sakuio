@@ -22,6 +22,11 @@ pub struct BucketRow {
     pub min_val: f64,
     pub max_val: f64,
     pub sample_count: i64,
+    pub sum_sq: f64,
+    pub variance: f64,
+    pub p50_val: f64,
+    pub p95_val: f64,
+    pub p99_val: f64,
 }
 
 /// Monitoring database kind, mirrored from the app layer.
@@ -163,20 +168,26 @@ impl MetricStore {
         let mut tx = self.pool.begin().await?;
         for chunk in rows.chunks(INSERT_CHUNK) {
             let values: Vec<&str> = (0..chunk.len())
-                .map(|_| "(?, ?, ?, ?, ?, ?, ?, ?)")
+                .map(|_| "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                 .collect();
             let columns = "(node_uuid, metric_key, bucket_seconds, bucket_start_ms, \
-                           avg_val, min_val, max_val, sample_count)";
+                           avg_val, min_val, max_val, sample_count, sum_sq, variance, \
+                           p50_val, p95_val, p99_val)";
             let sql = match self.dialect {
                 DbKind::MySql => {
                     format!(
-                        "INSERT IGNORE INTO {table} {columns} VALUES {}",
+                        "INSERT INTO {table} {columns} VALUES {} \
+                         ON DUPLICATE KEY UPDATE avg_val = VALUES(avg_val), \
+                         min_val = VALUES(min_val), max_val = VALUES(max_val), \
+                         sample_count = VALUES(sample_count)",
                         values.join(", ")
                     )
                 }
                 _ => format!(
                     "INSERT INTO {table} {columns} VALUES {} ON CONFLICT \
-                     (node_uuid, metric_key, bucket_seconds, bucket_start_ms) DO NOTHING",
+                     (node_uuid, metric_key, bucket_seconds, bucket_start_ms) DO UPDATE SET \
+                     avg_val = excluded.avg_val, min_val = excluded.min_val, \
+                     max_val = excluded.max_val, sample_count = excluded.sample_count",
                     values.join(", ")
                 ),
             };
@@ -190,7 +201,12 @@ impl MetricStore {
                     .bind(row.avg_val)
                     .bind(row.min_val)
                     .bind(row.max_val)
-                    .bind(row.sample_count);
+                    .bind(row.sample_count)
+                    .bind(row.sum_sq)
+                    .bind(row.variance)
+                    .bind(row.p50_val)
+                    .bind(row.p95_val)
+                    .bind(row.p99_val);
             }
             query.execute(&mut tx).await?;
         }
@@ -238,6 +254,7 @@ impl MetricStore {
                 grouped.entry(node_uuid.clone()).or_default().push(BucketRow {
                     node_uuid, metric_key, bucket_seconds, bucket_start_ms,
                     avg_val, min_val, max_val, sample_count,
+                    sum_sq: 0.0, variance: 0.0, p50_val: 0.0, p95_val: 0.0, p99_val: 0.0,
                 });
             }
         }
@@ -284,6 +301,11 @@ impl MetricStore {
                         min_val,
                         max_val,
                         sample_count,
+                        sum_sq: 0.0,
+                        variance: 0.0,
+                        p50_val: 0.0,
+                        p95_val: 0.0,
+                        p99_val: 0.0,
                     }
                 },
             )
@@ -335,6 +357,11 @@ impl MetricStore {
                             min_val,
                             max_val,
                             sample_count,
+                            sum_sq: 0.0,
+                            variance: 0.0,
+                            p50_val: 0.0,
+                            p95_val: 0.0,
+                            p99_val: 0.0,
                         },
                     )
                 },
@@ -395,6 +422,11 @@ impl MetricStore {
                         min_val,
                         max_val,
                         sample_count,
+                        sum_sq: 0.0,
+                        variance: 0.0,
+                        p50_val: 0.0,
+                        p95_val: 0.0,
+                        p99_val: 0.0,
                     }
                 },
             )

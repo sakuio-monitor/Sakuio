@@ -53,11 +53,26 @@ pub fn guest_me() -> Value {
     })
 }
 
+static PUBLIC_CLIENTS_CACHE: tokio::sync::Mutex<
+    Option<(std::time::Instant, Vec<PublicClientRow>)>,
+> = tokio::sync::Mutex::const_new(None);
+const PUBLIC_CLIENTS_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub async fn load_public_clients(state: &AppState) -> Result<Vec<PublicClientRow>, i32> {
-    ClientRepository::new(&state.db)
+    // Public SSE/WS pushes run per visitor. A one-second snapshot keeps that
+    // fan-out from issuing one full clients-table SELECT per visitor per tick.
+    let mut cache = PUBLIC_CLIENTS_CACHE.lock().await;
+    if let Some((at, rows)) = cache.as_ref() {
+        if at.elapsed() < PUBLIC_CLIENTS_TTL {
+            return Ok(rows.clone());
+        }
+    }
+    let rows = ClientRepository::new(&state.db)
         .list_for_public_api()
         .await
-        .map_err(|_| -32603)
+        .map_err(|_| -32603)?;
+    *cache = Some((std::time::Instant::now(), rows.clone()));
+    Ok(rows)
 }
 
 pub fn parse_basic(row: &PublicClientRow) -> BasicInfoParams {

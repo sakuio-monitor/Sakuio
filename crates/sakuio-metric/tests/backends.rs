@@ -209,5 +209,10 @@ fn bucket(node: &str, key: &str, window: i64, start: i64, avg: f64) -> BucketRow
         min_val: avg,
         max_val: avg,
         sample_count: 1,
+        sum_sq: avg * avg,
+        variance: 0.0,
+        p50_val: avg,
+        p95_val: avg,
+        p99_val: avg,
     }
 }

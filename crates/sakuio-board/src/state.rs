@@ -5,7 +5,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Recent telemetry window for realtime charts (~1 minute).
-pub const RECENT_TELEMETRY_MS: i64 = 60_000;
+pub const RECENT_TELEMETRY_MS: i64 = 600_000;
 
 /// Monotonic command cursor for sync/pull semantics.
 /// 用于同步/拉取语义的单调命令游标。

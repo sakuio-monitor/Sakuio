@@ -204,9 +204,12 @@ impl MetricWriter {
             start_all,
         };
 
-        // Workers are addressed by a fixed virtual shard count, so adding a
-        // worker never changes the shard a node was assigned to.
-        spawn_slot(&workers, 0, store_rx.clone(), policy.clone(), dropped.clone());
+        // Workers are addressed by a fixed virtual shard count. Start all of
+        // them: a low-volume node may hash to any shard, and leaving that shard
+        // idle would queue its samples forever below the autoscaler threshold.
+        for index in 0..max_workers {
+            spawn_slot(&workers, index, store_rx.clone(), policy.clone(), dropped.clone());
+        }
 
         // Autoscaler: start more pre-created slots while queues back up, but
         // never rehash an already assigned node.
@@ -424,10 +427,18 @@ fn spawn_worker(
                         }
                     }
                 }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
+                    current = store_rx.borrow().clone();
                     if !pending.is_empty() {
-                        current = store_rx.borrow().clone();
                         flush_pending(&current, &mut pending).await;
+                    }
+                    // Durability checkpoint: persist the current open windows
+                    // too, so a crash loses at most one 3s interval.
+                    let mut open = aggregator.snapshot();
+                    if !open.is_empty() {
+                        if let Err(e) = write_pending(&current, &mut open).await {
+                            tracing::warn!(error = %e, "partial metric checkpoint failed");
+                        }
                     }
                     last_flush = tokio::time::Instant::now();
                 }

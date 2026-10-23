@@ -595,6 +595,9 @@ impl<'a> ClientRepository<'a> {
                  LIMIT ?",
             )
             .bind(after_sort)
+            .bind(after_sort)
+            .bind(after_created.clone())
+            .bind(after_sort)
             .bind(after_created)
             .bind(after_uuid)
             .bind(fetch_limit)
@@ -1143,6 +1146,32 @@ impl<'a> ClientRepository<'a> {
             .bind(uuid)
             .execute(self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// One UPDATE for the telemetry hot path: last-seen timestamp plus the
+    /// cumulative traffic/uptime snapshot. This removes one write per batch.
+    pub async fn touch_last_seen_with_runtime(
+        &self,
+        uuid: &str,
+        net_total_up: u64,
+        net_total_down: u64,
+        uptime_secs: u64,
+    ) -> DbResult<()> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE clients SET last_seen_at = ?, updated_at = ?, \
+             last_net_total_up = ?, last_net_total_down = ?, last_uptime_secs = ? \
+             WHERE uuid = ?",
+        )
+        .bind(now.clone())
+        .bind(now)
+        .bind(net_total_up as i64)
+        .bind(net_total_down as i64)
+        .bind(uptime_secs as i64)
+        .bind(uuid)
+        .execute(self.pool)
+        .await?;
         Ok(())
     }
 
