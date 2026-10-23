@@ -115,6 +115,13 @@ async fn metric_store_works_on_every_backend() {
         // 重复桶被跳过而不是更新。
         assert_eq!(listed.len(), 2, "{} bucket rows", backend.name);
 
+        let cpu_only = store
+            .list_buckets_for_metric(&node, "cpu.usage", 60, start, start + 60_000, 100)
+            .await
+            .unwrap_or_else(|e| panic!("{} filtered bucket list failed: {e}", backend.name));
+        assert_eq!(cpu_only.len(), 1, "{} filtered bucket rows", backend.name);
+        assert_eq!(cpu_only[0].metric_key, "cpu.usage");
+
         store
             .set_retention_days("cpu.usage", 30)
             .await

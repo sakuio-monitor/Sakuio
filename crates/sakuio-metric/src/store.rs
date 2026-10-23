@@ -173,6 +173,52 @@ impl MetricStore {
         Ok(())
     }
 
+    /// Same as [`Self::list_buckets`], but narrows the SQL scan to one metric key.
+    pub async fn list_buckets_for_metric(
+        &self,
+        node_uuid: &str,
+        metric_key: &str,
+        bucket_seconds: i64,
+        since_ms: i64,
+        until_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<BucketRow>, MetricError> {
+        let sql = format!(
+            "SELECT node_uuid, metric_key, bucket_seconds, bucket_start_ms, \
+             avg_val, min_val, max_val, sample_count FROM {} \
+             WHERE node_uuid = ? AND metric_key = ? AND bucket_seconds = ? \
+             AND bucket_start_ms >= ? AND bucket_start_ms <= ? \
+             ORDER BY bucket_start_ms LIMIT ?",
+            self.table("buckets"),
+        );
+        let rows = sqlx::query_as::<_, (String, String, i64, i64, f64, f64, f64, i64)>(&sql)
+            .bind(node_uuid.to_string())
+            .bind(metric_key.to_string())
+            .bind(bucket_seconds)
+            .bind(since_ms)
+            .bind(until_ms)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(node_uuid, metric_key, bucket_seconds, bucket_start_ms, avg_val, min_val, max_val, sample_count)| {
+                    BucketRow {
+                        node_uuid,
+                        metric_key,
+                        bucket_seconds,
+                        bucket_start_ms,
+                        avg_val,
+                        min_val,
+                        max_val,
+                        sample_count,
+                    }
+                },
+            )
+            .collect())
+    }
+
     /// Pages every bucket row by ascending id (switch-time full sync).
     /// 按 id 升序分页读取全部桶行（切换库时的全量同步）。
     pub async fn page_buckets(

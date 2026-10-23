@@ -278,6 +278,15 @@ pub static TABLES: &[TableDef] = &[
                     "node_uuid",
                 ],
             ),
+            idx(
+                "idx_metric_buckets_node_metric",
+                &[
+                    "node_uuid",
+                    "bucket_seconds",
+                    "metric_key",
+                    "bucket_start_ms",
+                ],
+            ),
         ],
     },
     TableDef {

@@ -101,6 +101,10 @@ pub async fn public_get_records_by_uuid(
     let hours = hours.clamp(1, 168);
 
     let load_type = p.get("load_type").and_then(|t| t.as_str()).unwrap_or("");
+    let metric_key = p
+        .get("metric_key")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty());
 
     let until_ms = Utc::now().timestamp_millis();
     let since_ms = until_ms - hours * 3_600_000;
@@ -116,10 +120,15 @@ pub async fn public_get_records_by_uuid(
     };
 
     let store = state.metric.current_store().await;
-    let rows = store
-        .list_buckets(uuid, bucket_seconds, since_ms, until_ms, 50_000)
-        .await
-        .map_err(|_| (-32603, "Internal error"))?;
+    let rows = match metric_key {
+        Some(key) => store
+            .list_buckets_for_metric(uuid, key, bucket_seconds, since_ms, until_ms, 50_000)
+            .await,
+        None => store
+            .list_buckets(uuid, bucket_seconds, since_ms, until_ms, 50_000)
+            .await,
+    }
+    .map_err(|_| (-32603, "Internal error"))?;
 
     let records: Vec<Value> = buckets_to_records(uuid, bucket_seconds, &rows, since_ms);
 
@@ -199,6 +208,10 @@ pub async fn common_get_records(
         3600
     };
 
+    let metric_key = params
+        .and_then(|p| p.get("metric_key"))
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty());
     let store = state.metric.current_store().await;
     let node_list: Vec<String> = match uuid {
         Some(u) => vec![u.to_string()],
@@ -218,10 +231,19 @@ pub async fn common_get_records(
         5_000
     };
     for client in &node_list {
-        let Ok(node_rows) = store
-            .list_buckets(client, bucket_seconds, since_ms, until_ms, per_node_limit)
-            .await
-        else {
+        let node_rows = match metric_key {
+            Some(key) => {
+                store
+                    .list_buckets_for_metric(client, key, bucket_seconds, since_ms, until_ms, per_node_limit)
+                    .await
+            }
+            None => {
+                store
+                    .list_buckets(client, bucket_seconds, since_ms, until_ms, per_node_limit)
+                    .await
+            }
+        };
+        let Ok(node_rows) = node_rows else {
             continue;
         };
         for rec in buckets_to_records(client, bucket_seconds, &node_rows, since_ms) {
