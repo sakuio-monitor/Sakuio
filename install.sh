@@ -48,6 +48,10 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
+printf '\n========================================\n'
+printf ' Sakuio Server 安装程序\n'
+printf '========================================\n\n'
+
 # Short command (`curl ... | sudo bash`) asks only for the essentials.
 # When stdin is the script pipe, read prompts from /dev/tty.
 ask_tty() {
@@ -139,7 +143,9 @@ if [[ -z "$VERSION" ]]; then
   else
     VERSION="$(wget -qO- --max-redirs=5 "$LATEST_URL" 2>/dev/null | sed 's|.*/tag/v||' | sed 's|/$||' || true)"
   fi
-  if [[ -z "$VERSION" || "$VERSION" == *"releases/latest"* ]]; then
+  VERSION="${VERSION#v}"
+  VERSION="${VERSION%/}"
+  if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "error: failed to resolve latest version; pass --version" >&2
     exit 1
   fi
@@ -319,11 +325,14 @@ svc_status() {
 }
 svc_logs() {
   require_root
+  # Ctrl-C stops the log viewer and returns to the menu, not the shell.
+  trap ':' INT
   if [[ "\$IS_DARWIN" -eq 1 ]]; then
-    exec tail -f "\$INSTALL_DIR/data/sakuio.log"
+    tail -f "\$INSTALL_DIR/data/sakuio.log"
   else
-    exec journalctl -u "\$SERVICE_NAME" -f --no-pager
+    journalctl -u "\$SERVICE_NAME" -f --no-pager
   fi
+  trap - INT
 }
 svc_logs100() {
   require_root
@@ -335,14 +344,31 @@ svc_logs100() {
 }
 
 latest_version() {
-  local base
+  local base latest_url effective api tag
   base="\$(github_base "\${GITHUB_PROXY:-}")"
-  local latest_url="\${base}/sakuio-monitor/Sakuio/releases/latest"
+  latest_url="\${base}/sakuio-monitor/Sakuio/releases/latest"
+  effective=""
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL -o /dev/null -w '%{url_effective}' "\$latest_url" | sed 's|.*/tag/v||' | sed 's|/\$||'
+    effective="\$(curl -fsSL -o /dev/null -w '%{url_effective}' "\$latest_url" 2>/dev/null || true)"
   else
-    wget -qO- --max-redirs=5 "\$latest_url" 2>/dev/null | sed 's|.*/tag/v||'
+    effective="\$(wget -qO- --max-redirs=5 "\$latest_url" 2>/dev/null || true)"
   fi
+  if [[ "\$effective" =~ /tag/v([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+    printf '%s' "\${BASH_REMATCH[1]}"
+    return 0
+  fi
+  # Fall back to the GitHub API when the proxy does not expose the redirect.
+  api="https://api.github.com/repos/sakuio-monitor/Sakuio/releases/latest"
+  if command -v curl >/dev/null 2>&1; then
+    tag="\$(curl -fsSL -H 'Accept: application/vnd.github+json' "\$api" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)"
+  else
+    tag="\$(wget -qO- "\$api" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)"
+  fi
+  if [[ "\$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf '%s' "\$tag"
+    return 0
+  fi
+  return 1
 }
 
 do_update() {
@@ -353,10 +379,12 @@ do_update() {
   local version
   read -r -p "目标版本（留空安装最新）: " version
   if [[ -z "\$version" ]]; then
-    GITHUB_PROXY="\$proxy" version="\$(latest_version)"
+    version="\$(GITHUB_PROXY="\$proxy" latest_version)" || true
   fi
-  if [[ -z "\$version" || "\$version" == *"releases/latest"* ]]; then
-    echo "无法获取版本号" >&2
+  version="\${version#v}"
+  version="\${version%/}"
+  if [[ ! "\$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "无法获取有效版本号，请手动输入如 0.0.4" >&2
     return 1
   fi
   local os arch asset url tmp
@@ -418,9 +446,24 @@ do_disable_totp() {
   "\$BIN" admin disable-totp --username "\$user"
 }
 
+pause() {
+  if [[ -t 0 ]]; then
+    read -r -p "按 Enter 返回菜单..." _
+  fi
+}
+
 menu() {
+  local state
+  if [[ "\$IS_DARWIN" -eq 1 ]]; then
+    state="\$(launchctl print "system/\$SERVICE_NAME" >/dev/null 2>&1 && echo running || echo stopped)"
+  else
+    state="\$(systemctl is-active "\$SERVICE_NAME" 2>/dev/null || true)"
+  fi
+  printf '\n========================================\n'
+  printf ' Sakuio 管理控制台\n'
+  printf ' 服务状态: %s\n' "\${state:-unknown}"
+  printf '========================================\n'
   cat <<MENU
-Sakuio 管理菜单
   1) 启动服务
   2) 停止服务
   3) 重启服务
@@ -458,21 +501,20 @@ while true; do
   menu
   read -r -p "请选择 [0-11]: " choice
   case "\$choice" in
-    1) svc_start ;;
-    2) svc_stop ;;
-    3) svc_restart ;;
-    4) svc_status ;;
-    5) svc_logs ;;
-    6) svc_logs100 ;;
-    7) do_update ;;
-    8) do_username ;;
-    9) do_password ;;
-    10) do_disable_totp ;;
-    11) "\$BIN" admin list ;;
+    1) svc_start; pause ;;
+    2) svc_stop; pause ;;
+    3) svc_restart; pause ;;
+    4) svc_status; pause ;;
+    5) svc_logs; pause ;;
+    6) svc_logs100; pause ;;
+    7) do_update; pause ;;
+    8) do_username; pause ;;
+    9) do_password; pause ;;
+    10) do_disable_totp; pause ;;
+    11) "\$BIN" admin list; pause ;;
     0) exit 0 ;;
-    *) echo "无效选项" ;;
+    *) echo "无效选项"; pause ;;
   esac
-  echo
 done
 CLIEOF
 chmod 755 "$INSTALL_DIR/sakuio"
