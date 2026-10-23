@@ -320,7 +320,8 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 UNITEOF
   systemctl daemon-reload
-  systemctl enable --now "$SERVICE_NAME"
+  systemctl enable "$SERVICE_NAME"
+  systemctl restart "$SERVICE_NAME"
 fi
 
 
