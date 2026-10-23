@@ -194,6 +194,16 @@ async fn theme_serve(State(state): State<AppState>, request: Request) -> Respons
     if path == "/api" || path.starts_with("/api/") {
         return StatusCode::NOT_FOUND.into_response();
     }
+    // Before initialization, every browser route goes to the setup wizard.
+    // Admin assets are allowed so that the SPA can render /admin/install.
+    if *state.install_gate.read().await {
+        if path == "/admin" || path == "/admin/" || path == "/install" {
+            return axum::response::Redirect::to("/admin/install").into_response();
+        }
+        if !path.starts_with("/admin/") && path != "/favicon.ico" {
+            return axum::response::Redirect::to("/admin/install").into_response();
+        }
+    }
     if path == "/admin" {
         return axum::response::Redirect::to("/admin/").into_response();
     }
