@@ -239,6 +239,8 @@ impl<'a> PingRepository<'a> {
         .await?;
         self.rollup_ping(client_uuid, task_id, observed_at_ms, value_ms)
             .await?;
+        self.rollup_minute(client_uuid, task_id, observed_at_ms, value_ms)
+            .await?;
         Ok(())
     }
 
@@ -271,6 +273,146 @@ impl<'a> PingRepository<'a> {
             .execute(self.pool)
             .await?;
         Ok(())
+    }
+
+    async fn rollup_minute(
+        &self,
+        client_uuid: &str,
+        task_id: i64,
+        observed_at_ms: i64,
+        value_ms: i32,
+    ) -> PingDbResult<()> {
+        let minute = observed_at_ms - observed_at_ms.rem_euclid(60_000);
+        let valid = if value_ms >= 0 { 1 } else { 0 };
+        let loss = 1 - valid;
+        let value = value_ms.max(0) as f64;
+        let sql = match self.pool.kind() {
+            DbKind::MySql => "INSERT INTO ping_minute_rollup (task_id, client_uuid, minute_start_ms, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE samples = samples + 1, valid = valid + VALUES(valid), loss_count = loss_count + VALUES(loss_count), sum_ms = sum_ms + VALUES(sum_ms), sum_sq_ms = sum_sq_ms + VALUES(sum_sq_ms), min_ms = LEAST(min_ms, VALUES(min_ms)), max_ms = GREATEST(max_ms, VALUES(max_ms))",
+            DbKind::Postgres => "INSERT INTO ping_minute_rollup (task_id, client_uuid, minute_start_ms, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) ON CONFLICT (task_id, client_uuid, minute_start_ms) DO UPDATE SET samples = ping_minute_rollup.samples + 1, valid = ping_minute_rollup.valid + excluded.valid, loss_count = ping_minute_rollup.loss_count + excluded.loss_count, sum_ms = ping_minute_rollup.sum_ms + excluded.sum_ms, sum_sq_ms = ping_minute_rollup.sum_sq_ms + excluded.sum_sq_ms, min_ms = LEAST(ping_minute_rollup.min_ms, excluded.min_ms), max_ms = GREATEST(ping_minute_rollup.max_ms, excluded.max_ms)",
+            DbKind::Sqlite => "INSERT INTO ping_minute_rollup (task_id, client_uuid, minute_start_ms, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) ON CONFLICT (task_id, client_uuid, minute_start_ms) DO UPDATE SET samples = ping_minute_rollup.samples + 1, valid = ping_minute_rollup.valid + excluded.valid, loss_count = ping_minute_rollup.loss_count + excluded.loss_count, sum_ms = ping_minute_rollup.sum_ms + excluded.sum_ms, sum_sq_ms = ping_minute_rollup.sum_sq_ms + excluded.sum_sq_ms, min_ms = MIN(ping_minute_rollup.min_ms, excluded.min_ms), max_ms = MAX(ping_minute_rollup.max_ms, excluded.max_ms)",
+        };
+        sqlx::query(sql)
+            .bind(task_id)
+            .bind(client_uuid)
+            .bind(minute)
+            .bind(valid)
+            .bind(loss)
+            .bind(value)
+            .bind(value * value)
+            .bind(value)
+            .bind(value)
+            .execute(self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// One-time migration for raw probes written by older versions.
+    pub async fn backfill_minute_rollups(&self) -> PingDbResult<u64> {
+        let cutoff = chrono::Utc::now().timestamp_millis() - 10 * 60_000;
+        let existing: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ping_minute_rollup WHERE minute_start_ms < ?",
+        )
+        .bind(cutoff)
+        .fetch_one(self.pool)
+        .await?;
+        if existing > 0 {
+            return Ok(0);
+        }
+        let raw: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ping_records")
+            .fetch_one(self.pool)
+            .await?;
+        if raw == 0 {
+            return Ok(0);
+        }
+        let conflict = match self.pool.kind() {
+            DbKind::MySql => "ON DUPLICATE KEY UPDATE samples = samples",
+            _ => "ON CONFLICT (task_id, client_uuid, minute_start_ms) DO NOTHING",
+        };
+        let sql = format!(
+            "INSERT INTO ping_minute_rollup
+             (task_id, client_uuid, minute_start_ms, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms)
+             SELECT task_id, client_uuid,
+                    observed_at_ms - (observed_at_ms % 60000),
+                    COUNT(*),
+                    SUM(CASE WHEN value_ms >= 0 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN value_ms < 0 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN value_ms >= 0 THEN value_ms ELSE 0 END),
+                    SUM(CASE WHEN value_ms >= 0 THEN value_ms * value_ms ELSE 0 END),
+                    MIN(CASE WHEN value_ms >= 0 THEN value_ms ELSE 0 END),
+                    MAX(CASE WHEN value_ms >= 0 THEN value_ms ELSE 0 END)
+             FROM ping_records
+             GROUP BY task_id, client_uuid, observed_at_ms - (observed_at_ms % 60000)
+             {conflict}"
+        );
+        let result = sqlx::query(&sql).execute(self.pool).await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Reads minute rollups and converts them to the Ping record shape.
+    pub async fn list_minute_rollups(
+        &self,
+        client_uuid: Option<&str>,
+        task_id: Option<i64>,
+        since_ms: i64,
+        until_ms: i64,
+        limit: i32,
+    ) -> PingDbResult<Vec<PingRecordRow>> {
+        self.list_rollups("ping_minute_rollup", "minute_start_ms", client_uuid, task_id, since_ms, until_ms, limit)
+            .await
+    }
+
+    /// Reads hourly rollups and converts them to the Ping record shape.
+    pub async fn list_hourly_rollups(
+        &self,
+        client_uuid: Option<&str>,
+        task_id: Option<i64>,
+        since_ms: i64,
+        until_ms: i64,
+        limit: i32,
+    ) -> PingDbResult<Vec<PingRecordRow>> {
+        self.list_rollups("ping_rollup_hourly", "hour_start_ms", client_uuid, task_id, since_ms, until_ms, limit)
+            .await
+    }
+
+    async fn list_rollups(
+        &self,
+        table: &'static str,
+        time_col: &'static str,
+        client_uuid: Option<&str>,
+        task_id: Option<i64>,
+        since_ms: i64,
+        until_ms: i64,
+        limit: i32,
+    ) -> PingDbResult<Vec<PingRecordRow>> {
+        let limit = limit.clamp(1, 50_000);
+        let mut sql = format!(
+            "SELECT client_uuid, task_id, {time_col}, valid, sum_ms FROM {table} WHERE {time_col} >= ? AND {time_col} <= ?"
+        );
+        if client_uuid.is_some() {
+            sql.push_str(" AND client_uuid = ?");
+        }
+        if task_id.is_some() {
+            sql.push_str(" AND task_id = ?");
+        }
+        sql.push_str(&format!(" ORDER BY {time_col} DESC LIMIT ?"));
+        let mut q = sqlx::query_as::<_, (String, i64, i64, i64, f64)>(&sql).bind(since_ms).bind(until_ms);
+        if let Some(uuid) = client_uuid {
+            q = q.bind(uuid);
+        }
+        if let Some(tid) = task_id {
+            q = q.bind(tid);
+        }
+        let mut rows = q.bind(limit).fetch_all(self.pool).await?;
+        rows.reverse();
+        Ok(rows
+            .into_iter()
+            .map(|(client, task, ms, valid, sum)| PingRecordRow {
+                client,
+                task_id: task,
+                value: if valid > 0 { (sum / valid as f64).round() as i32 } else { -1 },
+                time: ms_to_rfc3339(ms),
+            })
+            .collect())
     }
 
     pub async fn list_records(

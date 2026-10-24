@@ -9,7 +9,7 @@ use sakuio_protocol::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{interval, Duration, MissedTickBehavior};
 
 pub struct PingScheduler {
@@ -68,11 +68,12 @@ async fn run_ping_loops(
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
     }
+    let mut loops = JoinSet::new();
     for (interval_secs, tasks) in groups {
         let board = board.clone();
         let bus = bus.clone();
         let pool = pool.clone();
-        tokio::spawn(async move {
+        loops.spawn(async move {
             let mut ticker = interval(Duration::from_secs(interval_secs as u64));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             fire_group(&pool, &board, &bus, &tasks).await;
@@ -82,9 +83,11 @@ async fn run_ping_loops(
             }
         });
     }
-    loop {
-        tokio::time::sleep(Duration::from_secs(86400)).await;
-    }
+    // Keep the JoinSet alive. Dropping it (on reload/abort) aborts every
+    // interval loop; leaving them detached made reloads spawn duplicate
+    // schedulers that fired the same ping task many times per interval.
+    while loops.join_next().await.is_some() {}
+    Ok(())
 }
 
 async fn fire_group(

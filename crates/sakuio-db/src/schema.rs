@@ -472,6 +472,28 @@ pub static TABLES: &[TableDef] = &[
         ],
     },
     TableDef {
+        name: "ping_minute_rollup",
+        cols: &[
+            req("id", AutoId),
+            req("task_id", BigInt),
+            req("client_uuid", Key),
+            req("minute_start_ms", BigInt),
+            def("samples", BigInt, DI(0)),
+            def("valid", BigInt, DI(0)),
+            def("loss_count", BigInt, DI(0)),
+            def("sum_ms", Double, DR(0.0)),
+            def("sum_sq_ms", Double, DR(0.0)),
+            def("min_ms", Double, DR(0.0)),
+            def("max_ms", Double, DR(0.0)),
+        ],
+        pk: &["id"],
+        fks: &[],
+        indexes: &[uniq(
+            "uq_ping_minute_rollup",
+            &["task_id", "client_uuid", "minute_start_ms"],
+        )],
+    },
+    TableDef {
         name: "ping_rollup_hourly",
         cols: &[
             req("task_id", BigInt),
@@ -831,7 +853,14 @@ async fn ensure_table(
         }
     }
     for index in table.indexes {
-        let index_name = if index_prefix.is_empty() {
+        // The default metric schema already names indexes `idx_metric_*` /
+        // `uq_metric_*`. Prefixing those again created duplicate indexes.
+        let built_in_metric_name =
+            index.name.starts_with("idx_metric") || index.name.starts_with("uq_metric");
+        let index_name = if index_prefix.is_empty()
+            || (index_prefix == "metric_" && built_in_metric_name)
+            || index.name.starts_with(index_prefix)
+        {
             index.name.to_string()
         } else {
             format!("{index_prefix}{}", index.name)
@@ -840,7 +869,26 @@ async fn ensure_table(
             let ddl = render(kind, &index_statement(physical, &index_name, index));
             sqlx::query(&ddl).execute(pool).await?;
         }
+        // Remove indexes created by older versions with the duplicated name.
+        let legacy = format!("{index_prefix}{index_name}");
+        if legacy != index_name && index_exists(pool, kind, physical, &legacy).await? {
+            drop_index(pool, kind, physical, &legacy).await?;
+        }
     }
+    Ok(())
+}
+
+async fn drop_index(
+    pool: &DbPool,
+    kind: DbKind,
+    table: &str,
+    name: &str,
+) -> Result<(), sqlx::Error> {
+    let sql = match kind {
+        DbKind::MySql => format!("DROP INDEX {name} ON {table}"),
+        _ => format!("DROP INDEX IF EXISTS {name}"),
+    };
+    sqlx::query(&sql).execute(pool).await?;
     Ok(())
 }
 

@@ -98,6 +98,11 @@ impl DashboardService {
         let service = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(8)).await;
+            // Older builds kept 48h of raw probes and no minute rollups.
+            // Aggregate once before the retention delete runs.
+            let _ = sakuio_db::PingRepository::new(&service.pool)
+                .backfill_minute_rollups()
+                .await;
             loop {
                 for code in ["90d", "365d"] {
                     if let Err(error) = service.refresh(code).await {
@@ -105,8 +110,14 @@ impl DashboardService {
                     }
                 }
                 let now = now_ms();
+                // Raw probes are only a short debug window; 1-minute rollups
+                // cover the quality page and hourly rollups cover long history.
                 let _ = sqlx::query("DELETE FROM ping_records WHERE observed_at_ms < ?")
-                    .bind(now - 48 * 3_600_000)
+                    .bind(now - 15 * 60_000)
+                    .execute(&service.pool)
+                    .await;
+                let _ = sqlx::query("DELETE FROM ping_minute_rollup WHERE minute_start_ms < ?")
+                    .bind(now - 10 * 3_600_000)
                     .execute(&service.pool)
                     .await;
                 let _ = sqlx::query("DELETE FROM ping_rollup_hourly WHERE hour_start_ms < ?")

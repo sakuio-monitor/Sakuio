@@ -32,11 +32,14 @@ pub async fn query_ping_records(
         return Ok(build_ping_response(&[], &[], &q, since_ms, until_ms));
     }
 
+    let hours = q.hours.clamp(1, 168);
     let until_ms = chrono::Utc::now().timestamp_millis();
-    let since_ms = until_ms - q.hours.clamp(1, 168) * 3_600_000;
+    let since_ms = until_ms - hours * 3_600_000;
 
-    let records = repo
-        .list_records(
+    // Raw Ping is kept for only a few minutes. History is served from
+    // 1-minute rollups (up to 10h) or hourly rollups (longer ranges).
+    let records = if hours <= 10 {
+        repo.list_minute_rollups(
             q.uuid.as_deref(),
             q.task_id,
             since_ms,
@@ -44,7 +47,17 @@ pub async fn query_ping_records(
             q.max_count,
         )
         .await
-        .map_err(|_| (-32603, "Internal error"))?;
+    } else {
+        repo.list_hourly_rollups(
+            q.uuid.as_deref(),
+            q.task_id,
+            since_ms,
+            until_ms,
+            q.max_count,
+        )
+        .await
+    }
+    .map_err(|_| (-32603, "Internal error"))?;
 
     Ok(build_ping_response(
         &records, &tasks, &q, since_ms, until_ms,
