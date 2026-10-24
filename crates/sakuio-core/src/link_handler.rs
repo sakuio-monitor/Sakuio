@@ -31,7 +31,7 @@ pub struct LinkSessionHandler {
     ingest: IngestPipeline,
     remote: Option<Arc<RemoteHub>>,
     geo_wake: Option<Arc<dyn Fn() + Send + Sync>>,
-    last_seen_write: tokio::sync::Mutex<std::time::Instant>,
+    last_seen_write: tokio::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 impl LinkSessionHandler {
@@ -45,10 +45,8 @@ impl LinkSessionHandler {
             ingest,
             remote: None,
             geo_wake: None,
-            // Avoid one UPDATE per 1s telemetry batch for every node.
-            last_seen_write: tokio::sync::Mutex::new(
-                std::time::Instant::now() - std::time::Duration::from_secs(60),
-            ),
+            // Avoid one UPDATE per 1s telemetry batch per node.
+            last_seen_write: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -319,8 +317,18 @@ impl BoardSessionHandler for LinkSessionHandler {
         // last_seen is for display only; online state is driven by the board
         // presence. Throttle it so 1s telemetry does not produce 1 DB commit
         // per node per second.
-        let mut last_write = self.last_seen_write.lock().await;
-        if last_write.elapsed() >= std::time::Duration::from_secs(10) {
+        let should_write = {
+            let mut writes = self.last_seen_write.lock().await;
+            let now = std::time::Instant::now();
+            let due = writes
+                .get(node_uuid)
+                .is_none_or(|last| now.duration_since(*last) >= std::time::Duration::from_secs(10));
+            if due {
+                writes.insert(node_uuid.to_string(), now);
+            }
+            due
+        };
+        if should_write {
             if let Some(sample) = batch.samples.last() {
                 let _ = clients
                     .touch_last_seen_with_runtime(
@@ -333,9 +341,7 @@ impl BoardSessionHandler for LinkSessionHandler {
             } else {
                 let _ = clients.touch_last_seen(node_uuid).await;
             }
-            *last_write = std::time::Instant::now();
         }
-        drop(last_write);
         tracing::debug!(
             node_uuid = %node_uuid,
             batch_seq,
