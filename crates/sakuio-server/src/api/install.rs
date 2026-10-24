@@ -277,6 +277,21 @@ pub async fn install_complete(
         }
         Err(e) => {
             tracing::warn!(error = %e, "install complete rejected");
+            crate::audit::record_auth_event_to(
+                &state.geo,
+                &state.db,
+                &audit_username,
+                "",
+                "INSTALL_FAILED",
+                &audit_username,
+                &format!("installation failed; driver={audit_driver}; error={e}"),
+                &audit_ip,
+                &audit_agent,
+                400,
+                "POST",
+                "/api/install/complete",
+            )
+            .await;
             (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "message": e.to_string() })),

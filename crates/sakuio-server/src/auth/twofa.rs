@@ -1,4 +1,4 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::{ConnectInfo, State}, http::{header, HeaderMap, StatusCode}, Json};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -8,6 +8,7 @@ use crate::AppState;
 use axum_extra::extract::CookieJar;
 use qrcodegen::{QrCode, QrCodeEcc};
 use sakuio_db::{generate_totp_secret, totp_provisioning_uri, AdminAuthRepository};
+use std::net::SocketAddr;
 
 #[derive(Deserialize)]
 pub struct TwoFaCodeBody {
@@ -92,6 +93,8 @@ pub async fn enable_2fa(
 
 pub async fn disable_2fa(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<Disable2faBody>,
 ) -> impl axum::response::IntoResponse {
@@ -117,5 +120,18 @@ pub async fn disable_2fa(
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db error");
     }
     let _ = repo.delete_sessions_for_user(&user.id).await;
+    let ip = crate::audit::client_ip(&headers, Some(addr));
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .chars()
+        .take(512)
+        .collect::<String>();
+    crate::audit::record_event(
+        &state, &user.username, &user.id, "SESSION_REVOKE_ALL", &user.username,
+        "2FA disabled", &ip, &ua, 200, "POST", "/api/admin/2fa/disable",
+    )
+    .await;
     api_success(json!({ "enabled": false, "reauthentication_required": true }))
 }

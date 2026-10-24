@@ -55,6 +55,20 @@ pub async fn login(
         return api_error(StatusCode::FORBIDDEN, "installation required");
     }
     if let Some(wait) = super::blocked_for(&audit_ip) {
+        crate::audit::record_auth_event(
+            &state,
+            &body.username,
+            "",
+            "LOGIN_RATE_LIMITED",
+            &body.username,
+            &format!("blocked for {} seconds", wait.as_secs().max(1)),
+            &audit_ip,
+            &audit_agent,
+            429,
+            "POST",
+            "/api/login",
+        )
+        .await;
         return (
             StatusCode::TOO_MANY_REQUESTS,
             [(header::RETRY_AFTER, wait.as_secs().max(1).to_string())],

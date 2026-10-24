@@ -13,6 +13,57 @@ pub fn classify(method: &Method, path: &str) -> &'static str {
     if path.contains("/fs/") {
         return classify_file(method, path);
     }
+    if path.starts_with("/api/admin/account") {
+        return if path.ends_with("/username") {
+            "ACCOUNT_USERNAME_CHANGE"
+        } else if path.ends_with("/password") {
+            "ACCOUNT_PASSWORD_CHANGE"
+        } else {
+            "ACCOUNT_UPDATE"
+        };
+    }
+    if path.starts_with("/api/admin/logs") {
+        return if path.ends_with("/ip-geo") {
+            "AUDIT_LOG_IP_GEO"
+        } else if path.ends_with("/export") {
+            "AUDIT_LOG_EXPORT"
+        } else {
+            "AUDIT_LOG_VIEW"
+        };
+    }
+    if path.starts_with("/api/admin/pprof/") {
+        if path.ends_with("/profile") {
+            return "PPROF_PROFILE_VIEW";
+        }
+        if path.ends_with("/stream") || path.ends_with("/summary") {
+            return "PPROF_STREAM_VIEW";
+        }
+        return "PPROF_VIEW";
+    }
+    if path.starts_with("/api/admin/ddns/") {
+        let providers = path.contains("/auth-providers") || path.contains("/providers");
+        let sync = path.ends_with("/sync");
+        if sync {
+            return "DDNS_SYNC";
+        }
+        if providers {
+            return match *method {
+                Method::POST => "DDNS_PROVIDER_CREATE",
+                Method::DELETE => "DDNS_PROVIDER_DELETE",
+                Method::PUT | Method::PATCH => "DDNS_PROVIDER_UPDATE",
+                _ => "DDNS_PROVIDER_VIEW",
+            };
+        }
+        return match *method {
+            Method::POST => "DDNS_RECORD_CREATE",
+            Method::DELETE => "DDNS_RECORD_DELETE",
+            Method::PUT | Method::PATCH => "DDNS_RECORD_UPDATE",
+            _ => "DDNS_RECORD_VIEW",
+        };
+    }
+    if path.ends_with("/update-agent") {
+        return "AGENT_UPDATE_SEND";
+    }
     if path.starts_with("/api/admin/clients") {
         return classify_clients(method, path);
     }
@@ -36,7 +87,9 @@ pub fn classify(method: &Method, path: &str) -> &'static str {
     }
     if path.starts_with("/api/admin/settings/geoip") {
         return if path.ends_with("/update") {
-            "GEOIP_UPDATE"
+            "GEOIP_DATABASE_UPDATE"
+        } else if path.ends_with("/config") {
+            "GEOIP_CONFIG_UPDATE"
         } else {
             "GEOIP_TEST"
         };
@@ -199,11 +252,14 @@ fn classify_notification(method: &Method, path: &str) -> &'static str {
 }
 
 fn classify_theme(method: &Method, path: &str) -> &'static str {
+    if path.ends_with("/preview") && method == Method::GET {
+        return "THEME_SOURCE_VIEW";
+    }
     if path.ends_with("/themes/upload") {
         return "THEME_UPLOAD";
     }
     if path.contains("/themes/market/") && path.ends_with("/install") {
-        return "THEME_INSTALL";
+        return "THEME_MARKET_INSTALL";
     }
     if path.ends_with("/config") && method == Method::PUT {
         return "THEME_CONFIG_UPDATE";
@@ -233,6 +289,12 @@ pub fn category_actions(category: &str) -> Option<&'static [&'static str]> {
         "TWO_FACTOR_SETUP",
         "TWO_FACTOR_ENABLE",
         "TWO_FACTOR_DISABLE",
+        "ACCOUNT_USERNAME_CHANGE",
+        "ACCOUNT_PASSWORD_CHANGE",
+        "ACCOUNT_UPDATE",
+        "LOGIN_RATE_LIMITED",
+        "SESSION_REVOKE",
+        "SESSION_REVOKE_ALL",
     ];
     const SERVER: &[&str] = &[
         "SERVER_ONLINE",
@@ -245,6 +307,17 @@ pub fn category_actions(category: &str) -> Option<&'static [&'static str]> {
         "SERVER_REORDER",
         "SERVER_GROUP_UPDATE",
         "SERVER_TRAFFIC_RESET",
+        "SERVER_TOKEN_VIEW",
+        "SERVER_INSTALL_COMMAND_VIEW",
+        "AGENT_UPDATE_SEND",
+        "AGENT_UPDATE_SUCCESS",
+        "AGENT_UPDATE_FAILED",
+        "AGENT_LINK_OPEN",
+        "AGENT_AUTH_FAILED",
+        "AGENT_AUTODISCOVERY_REGISTER",
+        "AGENT_AUTODISCOVERY_REJECTED",
+        "AGENT_VERSION_REJECTED",
+        "AGENT_RATE_LIMITED",
     ];
     const TERMINAL: &[&str] = &[
         "WEB_TERMINAL_OPEN",
@@ -274,15 +347,36 @@ pub fn category_actions(category: &str) -> Option<&'static [&'static str]> {
         "THEME_DELETE",
         "THEME_CONFIG_UPDATE",
         "THEME_OPERATION",
+        "THEME_SOURCE_VIEW",
+        "THEME_MARKET_INSTALL",
     ];
     const SETTINGS: &[&str] = &[
         "SITE_SETTINGS_UPDATE",
         "SHARE_TOKEN_REGENERATE",
         "GEOIP_UPDATE",
         "GEOIP_TEST",
+        "GEOIP_CONFIG_UPDATE",
+        "GEOIP_DATABASE_UPDATE",
         "BACKUP_DOWNLOAD",
         "BACKUP_RESTORE",
         "ADMIN_OPERATION",
+        "AUDIT_LOG_VIEW",
+        "AUDIT_LOG_EXPORT",
+        "AUDIT_LOG_IP_GEO",
+        "PPROF_PROFILE_VIEW",
+        "PPROF_STREAM_VIEW",
+        "PPROF_VIEW",
+        "DDNS_PROVIDER_CREATE",
+        "DDNS_PROVIDER_UPDATE",
+        "DDNS_PROVIDER_DELETE",
+        "DDNS_PROVIDER_VIEW",
+        "DDNS_RECORD_CREATE",
+        "DDNS_RECORD_UPDATE",
+        "DDNS_RECORD_DELETE",
+        "DDNS_RECORD_VIEW",
+        "DDNS_SYNC",
+        "GEOIP_CONFIG_UPDATE",
+        "GEOIP_DATABASE_UPDATE",
     ];
     const DATABASE: &[&str] = &[
         "DATABASE_SWITCH",

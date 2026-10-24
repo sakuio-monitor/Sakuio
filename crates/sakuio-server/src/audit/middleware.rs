@@ -19,7 +19,7 @@ const MAX_CAPTURED_BODY: usize = 16 * 1024;
 const MAX_USER_AGENT: usize = 512;
 
 fn should_audit(method: &Method, path: &str) -> bool {
-    if !path.starts_with("/api/admin/") || path.starts_with("/api/admin/logs") {
+    if !path.starts_with("/api/admin/") {
         return false;
     }
     if matches!(
@@ -32,7 +32,10 @@ fn should_audit(method: &Method, path: &str) -> bool {
     method == Method::GET
         && (path == "/api/admin/settings/database"
             || path.ends_with("/settings/backup")
-            || path.ends_with("/logs/export")
+            || path.starts_with("/api/admin/logs")
+            || path.starts_with("/api/admin/pprof/")
+            || path.ends_with("/themes/:short/preview")
+            || (path.contains("/themes/") && path.ends_with("/preview"))
             || (path.contains("/nodes/") && (path.ends_with("/shell") || path.contains("/fs/"))))
 }
 

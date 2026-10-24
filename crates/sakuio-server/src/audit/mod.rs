@@ -38,6 +38,26 @@ pub async fn record_auth_event(
     .await;
 }
 
+/// Writes a non-auth operational event (agent, background job, remote action).
+pub async fn record_event(
+    state: &AppState,
+    actor: &str,
+    actor_id: &str,
+    action: &str,
+    target: &str,
+    detail: &str,
+    ip: &str,
+    user_agent: &str,
+    status: i64,
+    method: &str,
+    path: &str,
+) {
+    record_auth_event(
+        state, actor, actor_id, action, target, detail, ip, user_agent, status, method, path,
+    )
+    .await;
+}
+
 /// Writes a critical event to an explicit pool (used when installing into a
 /// different database than the bootstrap DB).
 /// 写入指定连接池（安装到非 bootstrap 数据库时使用）。
