@@ -44,6 +44,7 @@ pub fn version_info() -> Value {
         "version": SERVER_VERSION,
         "hash": "sakuio",
         "build_time": option_env!("SAKUIO_BUILD_EPOCH").unwrap_or("0"),
+        "build_commit": option_env!("SAKUIO_BUILD_COMMIT").unwrap_or("unknown"),
         "agent_min": AGENT_VERSION_RANGE_MIN,
         "agent_max": AGENT_VERSION_RANGE_MAX,
     })
