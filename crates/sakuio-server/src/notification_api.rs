@@ -756,7 +756,7 @@ async fn list_all_admin_clients(
     let mut cursor: Option<String> = None;
     loop {
         let page = repo
-            .list_admin_page(cursor.as_deref(), 200)
+            .list_admin_page(cursor.as_deref(), 200, None)
             .await
             .map_err(|e| e.to_string())?;
         out.extend(page.items);

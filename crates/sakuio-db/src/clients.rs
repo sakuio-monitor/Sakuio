@@ -564,20 +564,35 @@ impl<'a> ClientRepository<'a> {
             .collect())
     }
 
-    /// Admin list page (keyset / cursor pagination).
-    /// 管理端列表（键集游标分页）。
+    /// Admin list page (keyset / cursor pagination) with optional backend search.
+    /// 管理端列表（键集游标分页），支持服务端搜索。
     pub async fn list_admin_page(
         &self,
         cursor: Option<&str>,
         limit: u32,
+        search: Option<&str>,
     ) -> DbResult<AdminClientListPage> {
         let limit = limit.clamp(1, 100) as i64;
         let fetch_limit = limit + 1;
+        let pattern = search
+            .map(str::trim)
+            .filter(|term| !term.is_empty())
+            .map(|term| format!("%{term}%"));
+        let search_clause = if pattern.is_some() {
+            " AND (LOWER(name) LIKE LOWER(?)
+                   OR LOWER(uuid) LIKE LOWER(?)
+                   OR LOWER(ipv4) LIKE LOWER(?)
+                   OR LOWER(ipv6) LIKE LOWER(?)
+                   OR LOWER(group_name) LIKE LOWER(?)
+                   OR LOWER(private_remark) LIKE LOWER(?))"
+        } else {
+            ""
+        };
 
         let rows: Vec<AdminClientRowRaw> = if let Some((after_sort, after_created, after_uuid)) =
             cursor.and_then(decode_admin_list_cursor)
         {
-            sqlx::query_as(
+            let sql = format!(
                 "SELECT uuid, name, token, online, disabled, ipv4, ipv6, region, region6,
                         agent_version,
                         group_name, private_remark, price, billing_cycle, currency,
@@ -588,23 +603,28 @@ impl<'a> ClientRepository<'a> {
                         last_uptime_secs, bandwidth, bandwidth_unit, report_interval_ms,
                         COALESCE(sort_order, 1e18) AS sort_order
                  FROM clients
-                 WHERE COALESCE(sort_order, 1e18) > ?
+                 WHERE (COALESCE(sort_order, 1e18) > ?
                     OR (COALESCE(sort_order, 1e18) = ? AND created_at > ?)
-                    OR (COALESCE(sort_order, 1e18) = ? AND created_at = ? AND uuid > ?)
+                    OR (COALESCE(sort_order, 1e18) = ? AND created_at = ? AND uuid > ?))
+                 {search_clause}
                  ORDER BY COALESCE(sort_order, 1e18) ASC, created_at ASC, uuid ASC
-                 LIMIT ?",
-            )
-            .bind(after_sort.unwrap_or(1e18))
-            .bind(after_sort.unwrap_or(1e18))
-            .bind(after_created.clone())
-            .bind(after_sort.unwrap_or(1e18))
-            .bind(after_created)
-            .bind(after_uuid)
-            .bind(fetch_limit)
-            .fetch_all(self.pool)
-            .await?
+                 LIMIT ?"
+            );
+            let mut query = sqlx::query_as::<_, AdminClientRowRaw>(&sql)
+                .bind(after_sort.unwrap_or(1e18))
+                .bind(after_sort.unwrap_or(1e18))
+                .bind(after_created.clone())
+                .bind(after_sort.unwrap_or(1e18))
+                .bind(after_created)
+                .bind(after_uuid);
+            if let Some(pattern) = &pattern {
+                for _ in 0..6 {
+                    query = query.bind(pattern);
+                }
+            }
+            query.bind(fetch_limit).fetch_all(self.pool).await?
         } else {
-            sqlx::query_as(
+            let sql = format!(
                 "SELECT uuid, name, token, online, disabled, ipv4, ipv6, region, region6,
                         agent_version,
                         group_name, private_remark, price, billing_cycle, currency,
@@ -615,12 +635,17 @@ impl<'a> ClientRepository<'a> {
                         last_uptime_secs, bandwidth, bandwidth_unit, report_interval_ms,
                         COALESCE(sort_order, 1e18) AS sort_order
                  FROM clients
+                 WHERE 1 = 1 {search_clause}
                  ORDER BY COALESCE(sort_order, 1e18) ASC, created_at ASC, uuid ASC
-                 LIMIT ?",
-            )
-            .bind(fetch_limit)
-            .fetch_all(self.pool)
-            .await?
+                 LIMIT ?"
+            );
+            let mut query = sqlx::query_as::<_, AdminClientRowRaw>(&sql);
+            if let Some(pattern) = &pattern {
+                for _ in 0..6 {
+                    query = query.bind(pattern);
+                }
+            }
+            query.bind(fetch_limit).fetch_all(self.pool).await?
         };
 
         let has_more = rows.len() > limit as usize;
@@ -633,9 +658,14 @@ impl<'a> ClientRepository<'a> {
             None
         };
 
-        let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM clients")
-            .fetch_one(self.pool)
-            .await?;
+        let count_sql = format!("SELECT COUNT(*) FROM clients WHERE 1 = 1{search_clause}");
+        let mut count_query = sqlx::query_as::<_, (i64,)>(&count_sql);
+        if let Some(pattern) = &pattern {
+            for _ in 0..6 {
+                count_query = count_query.bind(pattern);
+            }
+        }
+        let total = count_query.fetch_one(self.pool).await?;
 
         Ok(AdminClientListPage {
             items: page_rows.into_iter().map(map_admin_client_row).collect(),

@@ -29,6 +29,7 @@ pub struct ListAdminClientsQuery {
     pub cursor: Option<String>,
     #[serde(default = "default_admin_clients_limit")]
     pub limit: u32,
+    pub search: Option<String>,
 }
 
 fn default_admin_clients_limit() -> u32 {
@@ -91,7 +92,7 @@ pub async fn list_admin_clients(
 ) -> impl IntoResponse {
     let repo = ClientRepository::new(&state.db);
     match repo
-        .list_admin_page(query.cursor.as_deref(), query.limit)
+        .list_admin_page(query.cursor.as_deref(), query.limit, query.search.as_deref())
         .await
     {
         Ok(mut page) => {
@@ -108,6 +109,7 @@ pub async fn list_admin_clients(
             Json(serde_json::json!({
                 "items": page.items,
                 "next_cursor": page.next_cursor,
+                "total": page.total,
             }))
             .into_response()
         }
@@ -127,9 +129,10 @@ async fn admin_clients_snapshot(
     state: &AppState,
     cursor: Option<&str>,
     limit: u32,
+    search: Option<&str>,
 ) -> Result<serde_json::Value, sakuio_db::DbError> {
     let repo = ClientRepository::new(&state.db);
-    let mut page = repo.list_admin_page(cursor, limit).await?;
+    let mut page = repo.list_admin_page(cursor, limit, search).await?;
     for client in &mut page.items {
         fill_geo_regions(client);
         let snap = state
@@ -152,6 +155,7 @@ pub struct SyncAdminClientsBody {
     pub cursor: Option<String>,
     #[serde(default = "default_admin_clients_limit")]
     pub limit: u32,
+    pub search: Option<String>,
 }
 
 /// POST `/api/admin/clients/sync` — SSE 不可用时的轮询降级端点（当前页 + 总数）。
@@ -159,7 +163,14 @@ pub async fn sync_admin_clients(
     State(state): State<AppState>,
     Json(body): Json<SyncAdminClientsBody>,
 ) -> impl IntoResponse {
-    match admin_clients_snapshot(&state, body.cursor.as_deref(), body.limit).await {
+    match admin_clients_snapshot(
+        &state,
+        body.cursor.as_deref(),
+        body.limit,
+        body.search.as_deref(),
+    )
+    .await
+    {
         Ok(payload) => Json(payload).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "sync admin clients failed");
@@ -179,6 +190,7 @@ pub async fn stream_admin_clients(
 ) -> impl IntoResponse {
     let cursor = query.cursor.clone();
     let limit = query.limit;
+    let search = query.search.clone();
     let stream = futures_util::stream::unfold(
         (
             state,
@@ -187,10 +199,18 @@ pub async fn stream_admin_clients(
         ),
         move |(state, mut interval, mut last_json)| {
             let cursor = cursor.clone();
+            let search = search.clone();
             async move {
                 loop {
                     interval.tick().await;
-                    match admin_clients_snapshot(&state, cursor.as_deref(), limit).await {
+                    match admin_clients_snapshot(
+                    &state,
+                    cursor.as_deref(),
+                    limit,
+                    search.as_deref(),
+                )
+                .await
+                {
                         Ok(payload) => {
                             let json = payload.to_string();
                             if json == last_json {
