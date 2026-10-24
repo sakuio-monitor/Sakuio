@@ -484,7 +484,7 @@ impl DashboardService {
         let _refresh_guard = self.refresh_lock.lock().await;
         self.cache.write().await.remove(range);
         let store = self.metric.current_store().await;
-        let table = format!("{}buckets", store.prefix());
+        let table = store.view();
         let samples_expr = cast_int_sum("SUM(sample_count)", store.dialect());
         let fleet_sql = format!(
             "SELECT bucket_start_ms, metric_key, SUM(avg_val * sample_count) AS wsum, \
