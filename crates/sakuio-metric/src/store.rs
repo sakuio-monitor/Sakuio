@@ -5,6 +5,7 @@ use crate::config::MetricDbConfig;
 use crate::MetricError;
 use sakuio_db::{DbKind, DbPool};
 use sqlx::any::AnyPoolOptions;
+use std::sync::Arc;
 
 /// Rows per multi-value INSERT; 8 binds each stays far below every backend's bind limit.
 /// 单条多值 INSERT 的行数；每行 8 个参数，远低于各后端参数上限。
@@ -61,6 +62,7 @@ pub struct MetricStore {
     prefix: String,
     kind: MetricKind,
     dialect: DbKind,
+    series_cache: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), i64>>>,
 }
 
 impl MetricStore {
@@ -81,6 +83,7 @@ impl MetricStore {
                 prefix,
                 kind: MetricKind::Merged,
                 dialect: main_pool.kind(),
+                series_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             };
             store.ensure_retention_defaults().await?;
             return Ok(store);
@@ -122,6 +125,7 @@ impl MetricStore {
             prefix,
             kind,
             dialect,
+            series_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         };
         store.ensure_retention_defaults().await?;
         Ok(store)
@@ -162,6 +166,11 @@ impl MetricStore {
         format!("{}{}", self.prefix, suffix)
     }
 
+    /// Read-only joined view exposing node_uuid/metric_key.
+    pub fn view(&self) -> String {
+        format!("{}buckets_view", self.prefix)
+    }
+
     /// Bulk-inserts bucket rows with multi-value statements; duplicate buckets are skipped.
     /// 多值语句批量写入桶行；重复桶跳过。
     pub async fn insert_buckets(&self, rows: &[BucketRow]) -> Result<(), MetricError> {
@@ -169,37 +178,104 @@ impl MetricStore {
             return Ok(());
         }
         let table = self.table("buckets");
+        let nodes = self.table("nodes");
+        let keys = self.table("keys");
+        let series = self.table("series");
         let mut tx = self.pool.begin().await?;
-        for chunk in rows.chunks(INSERT_CHUNK) {
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            let key = (row.node_uuid.clone(), row.metric_key.clone());
+            let cached = self
+                .series_cache
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(&key).copied());
+            if let Some(id) = cached {
+                ids.push(id);
+                continue;
+            }
+            let ignore = if self.dialect == DbKind::MySql {
+                "INSERT IGNORE"
+            } else {
+                "INSERT"
+            };
+            let suffix = if self.dialect == DbKind::MySql {
+                ""
+            } else {
+                " ON CONFLICT DO NOTHING"
+            };
+            sqlx::query(&format!("{ignore} INTO {nodes} (uuid) VALUES (?){suffix}"))
+                .bind(&row.node_uuid)
+                .execute(&mut tx)
+                .await
+                .map_err(MetricError::Sqlx)?;
+            sqlx::query(&format!(
+                "{ignore} INTO {keys} (metric_key) VALUES (?){suffix}"
+            ))
+            .bind(&row.metric_key)
+            .execute(&mut tx)
+            .await
+            .map_err(MetricError::Sqlx)?;
+            let node_id: i64 =
+                sqlx::query_scalar(&format!("SELECT id FROM {nodes} WHERE uuid = ?"))
+                    .bind(&row.node_uuid)
+                    .fetch_one(&mut tx)
+                    .await
+                    .map_err(MetricError::Sqlx)?;
+            let metric_id: i64 =
+                sqlx::query_scalar(&format!("SELECT id FROM {keys} WHERE metric_key = ?"))
+                    .bind(&row.metric_key)
+                    .fetch_one(&mut tx)
+                    .await
+                    .map_err(MetricError::Sqlx)?;
+            sqlx::query(&format!(
+                "{ignore} INTO {series} (node_id, metric_id) VALUES (?, ?){suffix}"
+            ))
+            .bind(node_id)
+            .bind(metric_id)
+            .execute(&mut tx)
+            .await
+            .map_err(MetricError::Sqlx)?;
+            let series_id: i64 = sqlx::query_scalar(&format!(
+                "SELECT id FROM {series} WHERE node_id = ? AND metric_id = ?"
+            ))
+            .bind(node_id)
+            .bind(metric_id)
+            .fetch_one(&mut tx)
+            .await
+            .map_err(MetricError::Sqlx)?;
+            if let Ok(mut cache) = self.series_cache.lock() {
+                cache.insert(key, series_id);
+            }
+            ids.push(series_id);
+        }
+        for (chunk, id_chunk) in rows.chunks(INSERT_CHUNK).zip(ids.chunks(INSERT_CHUNK)) {
             let values: Vec<&str> = (0..chunk.len())
-                .map(|_| "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                .map(|_| "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                 .collect();
-            let columns = "(node_uuid, metric_key, bucket_seconds, bucket_start_ms, \
+            let columns = "(series_id, bucket_seconds, bucket_start_ms, \
                            avg_val, min_val, max_val, sample_count, sum_sq, variance, \
                            p50_val, p95_val, p99_val)";
             let sql = match self.dialect {
-                DbKind::MySql => {
-                    format!(
-                        "INSERT INTO {table} {columns} VALUES {} \
-                         ON DUPLICATE KEY UPDATE avg_val = VALUES(avg_val), \
-                         min_val = VALUES(min_val), max_val = VALUES(max_val), \
-                         sample_count = VALUES(sample_count)",
-                        values.join(", ")
-                    )
-                }
+                DbKind::MySql => format!(
+                    "INSERT INTO {table} {columns} VALUES {} \
+                     ON DUPLICATE KEY UPDATE avg_val = VALUES(avg_val), \
+                     min_val = VALUES(min_val), max_val = VALUES(max_val), \
+                     sample_count = VALUES(sample_count)",
+                    values.join(", ")
+                ),
                 _ => format!(
                     "INSERT INTO {table} {columns} VALUES {} ON CONFLICT \
-                     (node_uuid, metric_key, bucket_seconds, bucket_start_ms) DO UPDATE SET \
+                     (series_id, bucket_seconds, bucket_start_ms) DO UPDATE SET \
                      avg_val = excluded.avg_val, min_val = excluded.min_val, \
                      max_val = excluded.max_val, sample_count = excluded.sample_count",
                     values.join(", ")
                 ),
             };
             let mut query = sqlx::query(&sql);
-            for row in chunk {
+            for (row, series_id) in chunk.iter().zip(id_chunk) {
                 query = query
-                    .bind(row.node_uuid.clone())
-                    .bind(row.metric_key.clone())
+                    .bind(*series_id)
                     .bind(row.bucket_seconds)
                     .bind(row.bucket_start_ms)
                     .bind(row.avg_val)
@@ -212,7 +288,7 @@ impl MetricStore {
                     .bind(row.p95_val)
                     .bind(row.p99_val);
             }
-            query.execute(&mut tx).await?;
+            query.execute(&mut tx).await.map_err(MetricError::Sqlx)?;
         }
         tx.commit().await?;
         Ok(())
@@ -250,7 +326,7 @@ impl MetricStore {
                  WHERE node_uuid IN ({placeholders}) AND bucket_seconds = ? \
                  AND bucket_start_ms >= ? AND bucket_start_ms <= ?{metric_filter} \
                  ORDER BY node_uuid, bucket_start_ms LIMIT ?",
-                self.table("buckets"),
+                self.view(),
             );
             let mut query =
                 sqlx::query_as::<_, (String, String, i64, i64, f64, f64, f64, i64)>(&sql);
@@ -312,7 +388,7 @@ impl MetricStore {
              WHERE node_uuid = ? AND metric_key = ? AND bucket_seconds = ? \
              AND bucket_start_ms >= ? AND bucket_start_ms <= ? \
              ORDER BY bucket_start_ms LIMIT ?",
-            self.table("buckets"),
+            self.view(),
         );
         let rows = sqlx::query_as::<_, (String, String, i64, i64, f64, f64, f64, i64)>(&sql)
             .bind(node_uuid.to_string())
@@ -371,7 +447,7 @@ impl MetricStore {
              avg_val, min_val, max_val, sample_count FROM {} \
              WHERE (bucket_start_ms, node_uuid, metric_key, bucket_seconds) > (?, ?, ?, ?) \
              ORDER BY bucket_start_ms, node_uuid, metric_key, bucket_seconds LIMIT ?",
-            self.table("buckets")
+            self.view()
         );
         let rows = sqlx::query_as::<_, (String, String, i64, i64, f64, f64, f64, i64)>(&sql)
             .bind(after_start_ms)
@@ -428,7 +504,7 @@ impl MetricStore {
              WHERE node_uuid = {} AND bucket_seconds = {} \
              AND bucket_start_ms >= {} AND bucket_start_ms <= {} \
              ORDER BY bucket_start_ms LIMIT {}",
-            self.table("buckets"),
+            self.view(),
             "?",
             "?",
             "?",
@@ -486,8 +562,10 @@ impl MetricStore {
     ) -> Result<u64, MetricError> {
         let mut deleted = 0u64;
         let table = self.table("buckets");
+        let series = self.table("series");
+        let keys = self.table("keys");
         let by_key = format!(
-            "DELETE FROM {table} WHERE metric_key = {} AND bucket_seconds = {} AND bucket_start_ms < {}",
+            "DELETE FROM {table} WHERE series_id IN (SELECT s.id FROM {series} s JOIN {keys} k ON k.id = s.metric_id WHERE k.metric_key = {}) AND bucket_seconds = {} AND bucket_start_ms < {}",
             "?",
             "?",
             "?"
