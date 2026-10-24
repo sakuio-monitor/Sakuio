@@ -246,7 +246,6 @@ pub static TABLES: &[TableDef] = &[
     TableDef {
         name: "metric_buckets",
         cols: &[
-            req("id", AutoId),
             req("node_uuid", Key),
             req("metric_key", Key),
             req("bucket_seconds", BigInt),
@@ -261,18 +260,14 @@ pub static TABLES: &[TableDef] = &[
             def("p95_val", Double, DR(0.0)),
             def("p99_val", Double, DR(0.0)),
         ],
-        pk: &["id"],
+        pk: &[
+            "node_uuid",
+            "metric_key",
+            "bucket_seconds",
+            "bucket_start_ms",
+        ],
         fks: &[],
         indexes: &[
-            uniq(
-                "uq_metric_bucket",
-                &[
-                    "node_uuid",
-                    "metric_key",
-                    "bucket_seconds",
-                    "bucket_start_ms",
-                ],
-            ),
             idx(
                 "idx_metric_buckets_time",
                 &["bucket_seconds", "bucket_start_ms"],
@@ -331,13 +326,12 @@ pub static TABLES: &[TableDef] = &[
     TableDef {
         name: "ping_records",
         cols: &[
-            req("id", AutoId),
             req("client_uuid", Key),
             req("task_id", BigInt),
             req("observed_at_ms", BigInt),
             req("value_ms", BigInt),
         ],
-        pk: &["id"],
+        pk: &["client_uuid", "task_id", "observed_at_ms"],
         fks: &[Fk {
             name: "fk_ping_records_task",
             col: "task_id",
@@ -350,10 +344,6 @@ pub static TABLES: &[TableDef] = &[
                 &["client_uuid", "observed_at_ms"],
             ),
             idx("idx_ping_records_task_time", &["task_id", "observed_at_ms"]),
-            uniq(
-                "uq_ping_records_client_task_time",
-                &["client_uuid", "task_id", "observed_at_ms"],
-            ),
         ],
     },
     TableDef {
@@ -771,6 +761,13 @@ pub async fn dedupe_ping_records(pool: &DbPool) -> Result<(), sqlx::Error> {
     if !table_exists(pool, pool.kind(), "ping_records").await? {
         return Ok(());
     }
+    let columns = existing_columns(pool, pool.kind(), "ping_records").await?;
+    if !columns
+        .iter()
+        .any(|column| column.eq_ignore_ascii_case("id"))
+    {
+        return Ok(());
+    }
     let sql = match pool.kind() {
         DbKind::Sqlite => {
             "DELETE FROM ping_records WHERE id NOT IN (\
@@ -788,6 +785,102 @@ pub async fn dedupe_ping_records(pool: &DbPool) -> Result<(), sqlx::Error> {
         }
     };
     sqlx::query(sql).execute(pool).await?;
+    Ok(())
+}
+
+/// Rebuilds legacy tables that still carry the old auto-increment `id`.
+/// 重建仍带旧自增 `id` 的表，去掉无效行号列。
+pub async fn migrate_legacy_ids(pool: &DbPool) -> Result<(), sqlx::Error> {
+    for name in ["metric_buckets", "ping_records"] {
+        if !table_exists(pool, pool.kind(), name).await? {
+            continue;
+        }
+        let columns = existing_columns(pool, pool.kind(), name).await?;
+        if !columns
+            .iter()
+            .any(|column| column.eq_ignore_ascii_case("id"))
+        {
+            continue;
+        }
+        let Some(table) = TABLES.iter().find(|table| table.name == name) else {
+            continue;
+        };
+        if pool.kind() == DbKind::Postgres && is_timescale_hypertable(pool, name).await? {
+            tracing::warn!(table = name, "skip id migration on Timescale hypertable");
+            continue;
+        }
+        if let Err(error) = remove_id_column(pool, pool.kind(), table, name).await {
+            // The runtime SQL does not select id. Keeping the legacy column is
+            // safer than preventing the panel from starting.
+            tracing::warn!(table = name, error = %error, "legacy id migration skipped");
+        }
+    }
+    Ok(())
+}
+
+async fn is_timescale_hypertable(pool: &DbPool, table: &str) -> Result<bool, sqlx::Error> {
+    let result: Result<Option<i64>, sqlx::Error> = sqlx::query_scalar(
+        "SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = ? LIMIT 1",
+    )
+    .bind(table)
+    .fetch_optional(pool)
+    .await;
+    Ok(result.unwrap_or(None).is_some())
+}
+
+async fn remove_id_column(
+    pool: &DbPool,
+    kind: DbKind,
+    table: &TableDef,
+    physical: &str,
+) -> Result<(), sqlx::Error> {
+    let columns: Vec<&str> = table.cols.iter().map(|column| column.name).collect();
+    let column_list = columns.join(", ");
+    match kind {
+        DbKind::Sqlite => {
+            let temp = format!("{physical}__id_migration");
+            sqlx::query(&format!("DROP TABLE IF EXISTS {temp}"))
+                .execute(pool)
+                .await?;
+            let ddl = render(kind, &create_statement(kind, table, &temp));
+            sqlx::query(&ddl).execute(pool).await?;
+            sqlx::query(&format!(
+                "INSERT INTO {temp} ({column_list}) SELECT {column_list} FROM {physical}"
+            ))
+            .execute(pool)
+            .await?;
+            sqlx::query(&format!("DROP TABLE {physical}"))
+                .execute(pool)
+                .await?;
+            sqlx::query(&format!("ALTER TABLE {temp} RENAME TO {physical}"))
+                .execute(pool)
+                .await?;
+        }
+        DbKind::Postgres => {
+            sqlx::query(&format!("ALTER TABLE {physical} DROP COLUMN id"))
+                .execute(pool)
+                .await?;
+            sqlx::query(&format!(
+                "ALTER TABLE {physical} ADD PRIMARY KEY ({})",
+                table.pk.join(", ")
+            ))
+            .execute(pool)
+            .await?;
+        }
+        DbKind::MySql => {
+            sqlx::query(&format!(
+                "ALTER TABLE {physical} DROP PRIMARY KEY, DROP COLUMN id, ADD PRIMARY KEY ({})",
+                table.pk.join(", ")
+            ))
+            .execute(pool)
+            .await?;
+        }
+    }
+    for legacy in ["uq_metric_bucket", "uq_ping_records_client_task_time"] {
+        if index_exists(pool, kind, physical, legacy).await? {
+            drop_index(pool, kind, physical, legacy).await?;
+        }
+    }
     Ok(())
 }
 
@@ -827,6 +920,7 @@ pub async fn ensure_schema(pool: &DbPool, kind: DbKind, only: &[&str]) -> Result
 pub async fn ensure_metric_schema(pool: &DbPool, prefix: &str) -> Result<(), sqlx::Error> {
     let prefix = validate_prefix(prefix)?;
     let kind = pool.kind();
+    migrate_legacy_ids(pool).await?;
     for table in TABLES.iter().filter(|t| t.name.starts_with("metric_")) {
         let suffix = &table.name["metric_".len()..];
         let physical = format!("{prefix}{suffix}");

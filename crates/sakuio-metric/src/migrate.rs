@@ -34,23 +34,29 @@ pub async fn run_bucket_sync(
     target: &MetricStore,
     progress: impl Fn(u64, &str) + Send + Sync,
 ) -> Result<(), String> {
-    let mut last_id = 0i64;
+    let mut cursor = (0i64, String::new(), String::new(), 0i64);
     let mut total = 0u64;
     loop {
         let rows = source
-            .page_buckets(last_id, 1000)
+            .page_buckets(cursor.0, &cursor.1, &cursor.2, cursor.3, 1000)
             .await
             .map_err(|e| e.to_string())?;
         if rows.is_empty() {
             break;
         }
-        last_id = rows.last().map(|(id, _)| *id).unwrap_or(last_id);
-        let batch: Vec<BucketRow> = rows.into_iter().map(|(_, row)| row).collect();
+        if let Some(last) = rows.last() {
+            cursor = (
+                last.bucket_start_ms,
+                last.node_uuid.clone(),
+                last.metric_key.clone(),
+                last.bucket_seconds,
+            );
+        }
         target
-            .insert_buckets(&batch)
+            .insert_buckets(&rows)
             .await
             .map_err(|e| e.to_string())?;
-        total += batch.len() as u64;
+        total += rows.len() as u64;
         progress(total, "syncing buckets");
     }
     Ok(())
@@ -65,51 +71,61 @@ async fn migrate_buckets(
     progress: impl Fn(u64, &str),
 ) -> Result<(), String> {
     let table = format!("{prefix}buckets");
-    let mut last_id = 0i64;
+    let mut cursor = (0i64, String::new(), String::new(), 0i64);
     let mut total = 0u64;
     loop {
-        let rows: Vec<(i64, String, String, i64, i64, f64, f64, f64, i64)> =
-            sqlx::query_as(&format!(
-                "SELECT id, node_uuid, metric_key, bucket_seconds, bucket_start_ms, \
+        let rows: Vec<(String, String, i64, i64, f64, f64, f64, i64)> = sqlx::query_as(&format!(
+            "SELECT node_uuid, metric_key, bucket_seconds, bucket_start_ms, \
              avg_val, min_val, max_val, sample_count FROM {table} \
-             WHERE id > ? ORDER BY id LIMIT 1000"
-            ))
-            .bind(last_id)
-            .fetch_all(source)
-            .await
-            .map_err(|e| e.to_string())?;
+             WHERE (bucket_start_ms, node_uuid, metric_key, bucket_seconds) > (?, ?, ?, ?) \
+             ORDER BY bucket_start_ms, node_uuid, metric_key, bucket_seconds LIMIT 1000"
+        ))
+        .bind(cursor.0)
+        .bind(&cursor.1)
+        .bind(&cursor.2)
+        .bind(cursor.3)
+        .fetch_all(source)
+        .await
+        .map_err(|e| e.to_string())?;
         if rows.is_empty() {
             break;
         }
-        let mut batch: Vec<BucketRow> = Vec::with_capacity(rows.len());
-        for (
-            id,
-            node_uuid,
-            metric_key,
-            bucket_seconds,
-            bucket_start_ms,
-            avg_val,
-            min_val,
-            max_val,
-            sample_count,
-        ) in rows
-        {
-            last_id = id;
-            batch.push(BucketRow {
-                node_uuid,
-                metric_key,
-                bucket_seconds,
-                bucket_start_ms,
-                avg_val,
-                min_val,
-                max_val,
-                sample_count,
-                sum_sq: 0.0,
-                variance: 0.0,
-                p50_val: 0.0,
-                p95_val: 0.0,
-                p99_val: 0.0,
-            });
+        let batch: Vec<BucketRow> = rows
+            .into_iter()
+            .map(
+                |(
+                    node_uuid,
+                    metric_key,
+                    bucket_seconds,
+                    bucket_start_ms,
+                    avg_val,
+                    min_val,
+                    max_val,
+                    sample_count,
+                )| BucketRow {
+                    node_uuid,
+                    metric_key,
+                    bucket_seconds,
+                    bucket_start_ms,
+                    avg_val,
+                    min_val,
+                    max_val,
+                    sample_count,
+                    sum_sq: 0.0,
+                    variance: 0.0,
+                    p50_val: 0.0,
+                    p95_val: 0.0,
+                    p99_val: 0.0,
+                },
+            )
+            .collect();
+        if let Some(last) = batch.last() {
+            cursor = (
+                last.bucket_start_ms,
+                last.node_uuid.clone(),
+                last.metric_key.clone(),
+                last.bucket_seconds,
+            );
         }
         target
             .insert_buckets(&batch)

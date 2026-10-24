@@ -144,6 +144,9 @@ impl AppDatabase {
         schema::dedupe_ping_records(&pool)
             .await
             .map_err(|e| DbError::Message(format!("dedupe ping records: {e}")))?;
+        schema::migrate_legacy_ids(&pool)
+            .await
+            .map_err(|e| DbError::Message(format!("migrate legacy ids: {e}")))?;
         schema::ensure_schema(&pool, kind, &[])
             .await
             .map_err(|e| DbError::Message(format!("ensure schema: {e}")))?;

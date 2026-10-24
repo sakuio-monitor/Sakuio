@@ -356,23 +356,28 @@ impl MetricStore {
             .collect())
     }
 
-    /// Pages every bucket row by ascending id (switch-time full sync).
-    /// 按 id 升序分页读取全部桶行（切换库时的全量同步）。
+    /// Pages every bucket row by the bucket primary key, without a surrogate id.
+    /// 按桶复合主键分页读取全部桶行。
     pub async fn page_buckets(
         &self,
-        after_id: i64,
+        after_start_ms: i64,
+        after_node: &str,
+        after_metric: &str,
+        after_window: i64,
         limit: i64,
-    ) -> Result<Vec<(i64, BucketRow)>, MetricError> {
+    ) -> Result<Vec<BucketRow>, MetricError> {
         let sql = format!(
-            "SELECT id, node_uuid, metric_key, bucket_seconds, bucket_start_ms, \
+            "SELECT node_uuid, metric_key, bucket_seconds, bucket_start_ms, \
              avg_val, min_val, max_val, sample_count FROM {} \
-             WHERE id > {} ORDER BY id LIMIT {}",
-            self.table("buckets"),
-            "?",
-            "?",
+             WHERE (bucket_start_ms, node_uuid, metric_key, bucket_seconds) > (?, ?, ?, ?) \
+             ORDER BY bucket_start_ms, node_uuid, metric_key, bucket_seconds LIMIT ?",
+            self.table("buckets")
         );
-        let rows = sqlx::query_as::<_, (i64, String, String, i64, i64, f64, f64, f64, i64)>(&sql)
-            .bind(after_id)
+        let rows = sqlx::query_as::<_, (String, String, i64, i64, f64, f64, f64, i64)>(&sql)
+            .bind(after_start_ms)
+            .bind(after_node)
+            .bind(after_metric)
+            .bind(after_window)
             .bind(limit)
             .fetch_all(self.read_pool())
             .await?;
@@ -380,7 +385,6 @@ impl MetricStore {
             .into_iter()
             .map(
                 |(
-                    id,
                     node_uuid,
                     metric_key,
                     bucket_seconds,
@@ -389,25 +393,20 @@ impl MetricStore {
                     min_val,
                     max_val,
                     sample_count,
-                )| {
-                    (
-                        id,
-                        BucketRow {
-                            node_uuid,
-                            metric_key,
-                            bucket_seconds,
-                            bucket_start_ms,
-                            avg_val,
-                            min_val,
-                            max_val,
-                            sample_count,
-                            sum_sq: 0.0,
-                            variance: 0.0,
-                            p50_val: 0.0,
-                            p95_val: 0.0,
-                            p99_val: 0.0,
-                        },
-                    )
+                )| BucketRow {
+                    node_uuid,
+                    metric_key,
+                    bucket_seconds,
+                    bucket_start_ms,
+                    avg_val,
+                    min_val,
+                    max_val,
+                    sample_count,
+                    sum_sq: 0.0,
+                    variance: 0.0,
+                    p50_val: 0.0,
+                    p95_val: 0.0,
+                    p99_val: 0.0,
                 },
             )
             .collect())
