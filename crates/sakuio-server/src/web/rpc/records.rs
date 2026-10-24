@@ -1,6 +1,7 @@
 use crate::AppState;
 use chrono::{TimeZone, Utc};
 use sakuio_board::{BoardStateStore, RECENT_TELEMETRY_MS};
+use sakuio_db::ClientRepository;
 use sakuio_protocol::{BasicInfoParams, TelemetrySample};
 use serde_json::{json, Value};
 
@@ -55,12 +56,10 @@ pub async fn public_get_client_recent_records(
         .filter(|s| !s.is_empty())
         .ok_or((-32602, "UUID is required"))?;
 
-    let rows = load_public_clients(state)
+    let row = ClientRepository::new(&state.db)
+        .get_for_public_api(uuid)
         .await
-        .map_err(|_| (-32603, "Internal error"))?;
-    let row = rows
-        .iter()
-        .find(|r| r.uuid == uuid)
+        .map_err(|_| (-32603, "Internal error"))?
         .ok_or((-32602, "UUID is required"))?;
 
     let since = Utc::now().timestamp_millis() - RECENT_TELEMETRY_MS;
@@ -70,7 +69,7 @@ pub async fn public_get_client_recent_records(
         .await
         .map_err(|_| (-32603, "Internal error"))?;
 
-    let basic = parse_basic(row);
+    let basic = parse_basic(&row);
     let reports: Vec<Value> = samples
         .iter()
         .map(|s| v2_report_from_sample(s, &basic))
