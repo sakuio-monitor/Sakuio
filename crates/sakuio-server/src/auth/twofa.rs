@@ -116,5 +116,6 @@ pub async fn disable_2fa(
     if repo.disable_totp(&user.id).await.is_err() {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db error");
     }
-    api_success(json!({ "enabled": false }))
+    let _ = repo.delete_sessions_for_user(&user.id).await;
+    api_success(json!({ "enabled": false, "reauthentication_required": true }))
 }

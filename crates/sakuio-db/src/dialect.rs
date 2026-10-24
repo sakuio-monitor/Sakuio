@@ -71,8 +71,8 @@ impl DbPool {
         sqlx::any::install_default_drivers();
         let kind = DbKind::detect(dsn);
         let max_connections = options.get_max_connections();
-        let options = if kind == DbKind::Sqlite {
-            options.after_connect(|conn, _meta| {
+        let options = match kind {
+            DbKind::Sqlite => options.after_connect(|conn, _meta| {
                 Box::pin(async move {
                     for pragma in [
                         "PRAGMA journal_mode=WAL",
@@ -87,9 +87,26 @@ impl DbPool {
                     }
                     Ok(())
                 })
-            })
-        } else {
-            options
+            }),
+            DbKind::Postgres => options.after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query("SET statement_timeout = '30s'")
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query("SET lock_timeout = '10s'")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            }),
+            DbKind::MySql => options.after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query("SET SESSION max_execution_time = 30000")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            }),
         };
         let inner = options.connect(dsn).await?;
         // WAL is a file-level setting; enabling it once at open time avoids

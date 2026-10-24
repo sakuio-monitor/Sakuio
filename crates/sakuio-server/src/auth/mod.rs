@@ -1,10 +1,12 @@
 mod account;
 mod login;
+mod rate_limit;
 mod middleware;
 mod twofa;
 
 pub use account::{change_password, change_username};
 pub use login::{login, logout, session_me};
+pub use rate_limit::{blocked_for, record_failure, record_success};
 pub use middleware::{admin_auth_layer, AdminUser, RequireAdmin};
 pub use twofa::{disable_2fa, enable_2fa, setup_2fa};
 
@@ -34,4 +36,15 @@ pub fn me_response(data: serde_json::Value, token: Option<&str>) -> serde_json::
         }
     }
     flat
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn me_response_never_attaches_a_token_unless_explicitly_requested() {
+        let body = me_response(serde_json::json!({"logged_in": true}), None);
+        assert!(body.get("set-cookie").is_none());
+    }
 }

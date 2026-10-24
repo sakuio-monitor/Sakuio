@@ -178,6 +178,15 @@ impl<'a> AdminAuthRepository<'a> {
         )
     }
 
+    /// Revokes every session for a user after password/TOTP/username changes.
+    pub async fn delete_sessions_for_user(&self, user_id: &str) -> DbResult<()> {
+        sqlx::query("DELETE FROM admin_sessions WHERE user_id = ?")
+            .bind(user_id)
+            .execute(self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn delete_session(&self, token: &str) -> DbResult<()> {
         let token_hash = hash_token(token);
         sqlx::query("DELETE FROM admin_sessions WHERE token_hash = ?")

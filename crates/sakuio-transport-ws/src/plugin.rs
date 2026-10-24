@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use axum::{
     extract::{
         ws::{WebSocket, WebSocketUpgrade},
-        Query, State,
+        State,
     },
     response::IntoResponse,
 };
@@ -15,7 +15,6 @@ use sakuio_core::{flush_pending_ping_commands, new_session_id, AgentCommandBus};
 use sakuio_db::ClientRepository;
 use sakuio_db::DbPool;
 use sakuio_protocol::{ControlMessage, TelemetryBatch};
-use serde::Deserialize;
 use std::sync::Arc;
 
 /// Default HTTP path for the agent WebSocket link.
@@ -30,13 +29,6 @@ pub struct WsLinkState {
     pub handler: Arc<dyn BoardSessionHandler>,
     pub command_bus: AgentCommandBus,
     pub board: Arc<dyn BoardStateStore>,
-}
-
-/// Query parameters for the agent WebSocket URL.
-/// Agent WebSocket URL 的查询参数。
-#[derive(Debug, Deserialize)]
-pub struct LinkQuery {
-    pub token: String,
 }
 
 /// WebSocket transport plugin entry point.
@@ -63,9 +55,8 @@ impl TransportPlugin for WsBoardTransportPlugin {
 pub async fn ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<WsLinkState>,
-    Query(query): Query<LinkQuery>,
+    token: String,
 ) -> impl IntoResponse {
-    let token = query.token;
     let db = state.db.clone();
     let handler = state.handler.clone();
     let command_bus = state.command_bus.clone();

@@ -49,6 +49,7 @@ pub async fn run(args: &[String]) -> Result<()> {
                 bail!("username {new_name:?} is already in use");
             }
             repo.update_username(&user_id, new_name).await?;
+            repo.delete_sessions_for_user(&user_id).await?;
             println!("administrator renamed to {new_name}");
         }
         "set-password" => {
@@ -58,10 +59,12 @@ pub async fn run(args: &[String]) -> Result<()> {
             }
             let hash = AdminAuthRepository::hash_password(&password)?;
             repo.update_password_hash(&user_id, &hash).await?;
+            repo.delete_sessions_for_user(&user_id).await?;
             println!("password updated for {username}");
         }
         "disable-totp" => {
             repo.disable_totp(&user_id).await?;
+            repo.delete_sessions_for_user(&user_id).await?;
             println!("TOTP disabled for {username}");
         }
         other => bail!("unknown admin command: {other}"),

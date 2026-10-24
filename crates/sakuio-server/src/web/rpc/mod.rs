@@ -4,6 +4,7 @@ mod dispatch;
 mod ping;
 mod records;
 mod rest;
+mod rate_limit;
 mod transport;
 mod types;
 
@@ -12,4 +13,5 @@ pub use rest::{
     api_nodes, api_public, api_public_ping_records, api_public_ping_tasks, api_recent,
     api_records_load, api_version,
 };
+pub use rate_limit::limit_rpc;
 pub use transport::{rpc2_get, rpc2_post};

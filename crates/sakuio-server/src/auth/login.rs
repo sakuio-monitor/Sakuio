@@ -28,6 +28,14 @@ fn login_needs_2fa_error() -> axum::response::Response {
         .into_response()
 }
 
+fn is_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(',').next().unwrap_or("").trim().eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+}
+
 pub async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -45,6 +53,17 @@ pub async fn login(
         .collect::<String>();
     if *state.install_gate.read().await {
         return api_error(StatusCode::FORBIDDEN, "installation required");
+    }
+    if let Some(wait) = super::blocked_for(&audit_ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, wait.as_secs().max(1).to_string())],
+            Json(json!({
+                "status": "error",
+                "message": format!("too many failed login attempts; retry in {} seconds", wait.as_secs().max(1)),
+            })),
+        )
+            .into_response();
     }
     let repo = AdminAuthRepository::new(&state.db);
     let Some((user_id, hash, totp_enabled, totp_secret)) =
@@ -64,6 +83,7 @@ pub async fn login(
             "/api/login",
         )
         .await;
+        super::record_failure(&audit_ip);
         return api_error(StatusCode::UNAUTHORIZED, "Invalid credentials");
     };
     if !AdminAuthRepository::verify_password(&body.password, &hash) {
@@ -81,6 +101,7 @@ pub async fn login(
             "/api/login",
         )
         .await;
+        super::record_failure(&audit_ip);
         return api_error(StatusCode::UNAUTHORIZED, "Invalid credentials");
     }
     if login_requires_2fa(totp_enabled, &totp_secret) {
@@ -118,22 +139,27 @@ pub async fn login(
                 "/api/login",
             )
             .await;
+            super::record_failure(&audit_ip);
             return api_error(StatusCode::UNAUTHORIZED, "Invalid 2FA code");
         }
     }
+    super::record_success(&audit_ip);
     let token = match repo.create_session(&user_id, None, None).await {
         Ok(t) => t,
         Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "session failed"),
     };
+    let secure = is_https(&headers);
     let cookie = Cookie::build((SESSION_COOKIE, token.clone()))
         .path("/")
         .http_only(true)
+        .secure(secure)
         .same_site(SameSite::Lax)
         .max_age(cookie::time::Duration::seconds(SESSION_MAX_AGE_SECS))
         .build();
     let compat_cookie = Cookie::build((SESSION_COOKIE_COMPAT, token.clone()))
         .path("/")
         .http_only(true)
+        .secure(secure)
         .same_site(SameSite::Lax)
         .max_age(cookie::time::Duration::seconds(SESSION_MAX_AGE_SECS))
         .build();
@@ -272,7 +298,9 @@ pub async fn session_me(State(state): State<AppState>, jar: CookieJar) -> axum::
                     "sso_type": "",
                     "sso_id": "",
                 }),
-                Some(token),
+                // Never expose the session token to page JavaScript. Themes
+                // and XSS must not be able to read the HttpOnly session.
+                None,
             ))
             .into_response(),
             Ok(None) => Json(me_response(sakuio_db::guest_me_json(), None)).into_response(),

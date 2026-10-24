@@ -136,7 +136,7 @@ fn mime_for_admin(path: &str) -> String {
 /// Serves the admin SPA shipped inside the active theme's `dist/admin-app`,
 /// or a standalone admin build under `SAKUIO_ADMIN_DIR` / `data/admin-app`.
 /// This is what `/admin/dashboard` and Komari theme login redirects target.
-async fn admin_serve(state: &AppState, path: &str, method: &Method) -> Option<Response> {
+async fn admin_serve(_state: &AppState, path: &str, method: &Method) -> Option<Response> {
     let relative = path.strip_prefix("/admin").unwrap_or(path);
     let relative = relative.trim_start_matches('/');
     let requested = if relative.is_empty() {
@@ -144,25 +144,18 @@ async fn admin_serve(state: &AppState, path: &str, method: &Method) -> Option<Re
     } else {
         relative
     };
-    let mut file = state.theme.read_admin_asset(requested).await;
-    if file.is_none() {
-        if let Some(bytes) = read_local_admin_file(requested) {
-            file = Some(theme::ThemeFile {
-                bytes,
-                mime: mime_for_admin(requested),
-            });
-        }
-    }
+    // Only the signed-in embedded/local admin SPA may be served here. An
+    // installed public theme must never be able to replace /admin and steal
+    // administrator credentials or session cookies.
+    let mut file = read_local_admin_file(requested).map(|bytes| theme::ThemeFile {
+        bytes,
+        mime: mime_for_admin(requested),
+    });
     if file.is_none() && !relative.contains('.') {
-        file = state.theme.read_admin_asset("index.html").await;
-        if file.is_none() {
-            if let Some(bytes) = read_local_admin_file("index.html") {
-                file = Some(theme::ThemeFile {
-                    bytes,
-                    mime: "text/html; charset=utf-8".into(),
-                });
-            }
-        }
+        file = read_local_admin_file("index.html").map(|bytes| theme::ThemeFile {
+            bytes,
+            mime: "text/html; charset=utf-8".into(),
+        });
     }
     let Some(file) = file else {
         return None;
@@ -624,8 +617,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/install/complete", post(api::install_complete))
         .route("/api/install/test-db", post(api::install_test_db))
         .fallback(theme_serve)
-        .layer(TraceLayer::new_for_http())
-        .with_state(app_state);
+        .layer(TraceLayer::new_for_http());
+    let drain_state = app_state.clone();
+    let app = app.with_state(app_state);
 
     let listen_value = std::env::var("SAKUIO_LISTEN")
         .ok()
@@ -656,6 +650,36 @@ async fn main() -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        // Flush every open metric window before the process exits. The
+        // checkpoint is a crash fallback, not a substitute for a clean drain.
+        let store = drain_state.metric.current_store().await;
+        match drain_state.metric.handle.flush_to_store(store).await {
+            Ok(rows) => tracing::info!(rows, "metric writer flushed on shutdown"),
+            Err(error) => tracing::warn!(%error, "metric writer flush on shutdown failed"),
+        }
+    })
     .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut signal) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            signal.recv().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }

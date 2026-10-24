@@ -4,4 +4,4 @@
 mod plugin;
 mod session;
 
-pub use plugin::{ws_upgrade, LinkQuery, WsBoardTransportPlugin, WsLinkState, WS_LINK_PATH};
+pub use plugin::{ws_upgrade, WsBoardTransportPlugin, WsLinkState, WS_LINK_PATH};

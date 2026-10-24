@@ -45,6 +45,7 @@ pub async fn change_username(
     if repo.update_username(&user.id, &username).await.is_err() {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
     }
+    let _ = repo.delete_sessions_for_user(&user.id).await;
     api_success(json!({
         "username": username,
         "2fa_enabled": user.totp_enabled,
@@ -77,5 +78,6 @@ pub async fn change_password(
     if repo.update_password_hash(&user.id, &hash).await.is_err() {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
     }
-    api_success(json!({ "updated": true }))
+    let _ = repo.delete_sessions_for_user(&user.id).await;
+    api_success(json!({ "updated": true, "reauthentication_required": true }))
 }

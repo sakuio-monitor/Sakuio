@@ -6,6 +6,7 @@ use crate::AppState;
 use super::clients_ws::{clients_sse, clients_websocket};
 use super::respond::api_error;
 use super::rpc::{
+    limit_rpc,
     api_nodes, api_public, api_public_ping_records, api_public_ping_tasks, api_recent,
     api_records_load, api_version, rpc2_get, rpc2_post,
 };
@@ -36,5 +37,5 @@ pub fn public_api_router() -> Router<AppState> {
         .route("/api/records/load", get(api_records_load))
         .route("/api/records/ping", get(api_public_ping_records))
         .route("/api/task/ping", get(api_public_ping_tasks))
-        .route("/api/rpc2", get(rpc2_get).post(rpc2_post))
+        .route("/api/rpc2", get(rpc2_get).post(rpc2_post).layer(axum::middleware::from_fn(limit_rpc)))
 }

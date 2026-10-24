@@ -17,6 +17,10 @@ use crate::remote::parse_file_result;
 use crate::RemoteHub;
 
 const SNAPSHOT_TTL: Duration = Duration::from_secs(120);
+/// Hard cap so a compromised node cannot allocate an unbounded telemetry batch.
+const MAX_TELEMETRY_SAMPLES: usize = 120;
+/// Hard cap for one ping batch result.
+const MAX_PING_RESULTS: usize = 256;
 const SYNC_READ_LIMIT: u32 = 64;
 
 /// Handles SakuLink control and telemetry for one board transport.
@@ -301,6 +305,12 @@ impl BoardSessionHandler for LinkSessionHandler {
                 "telemetry batch uuid mismatch"
             );
         }
+        if batch.samples.len() > MAX_TELEMETRY_SAMPLES {
+            return Err(format!(
+                "telemetry batch has too many samples ({} > {MAX_TELEMETRY_SAMPLES})",
+                batch.samples.len()
+            ));
+        }
         self.ingest
             .ingest_telemetry(node_uuid, &batch)
             .await
@@ -375,6 +385,15 @@ impl LinkSessionHandler {
             .and_then(|v| v.as_str())
             .unwrap_or(METHOD_AGENT_PING_RESULT);
         if method == METHOD_AGENT_PING_BATCH_RESULT {
+            if payload
+                .get("results")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|results| results.len() > MAX_PING_RESULTS)
+            {
+                return Err(format!(
+                    "ping batch has too many results (>{MAX_PING_RESULTS})"
+                ));
+            }
             // Agent sends `{"method": ..., "results": [...]}`, while the
             // struct expects `{"results": [...]}`. Do not deserialize the
             // array itself, or every batch result is silently rejected.

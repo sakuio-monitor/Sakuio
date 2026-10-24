@@ -1,11 +1,11 @@
 use crate::AppState;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use sakuio_db::ClientRepository;
-use sakuio_transport_ws::{ws_upgrade, LinkQuery};
+use sakuio_transport_ws::ws_upgrade;
 use std::net::SocketAddr;
 
 /// GET `/api/agent/link` — WebSocket upgrade entry.
@@ -15,10 +15,15 @@ pub async fn agent_link(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Query(query): Query<LinkQuery>,
 ) -> impl IntoResponse {
     let repo = ClientRepository::new(&state.db);
-    let token = query.token.trim().to_string();
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
     if token.is_empty() {
         return (
             StatusCode::UNAUTHORIZED,
@@ -60,10 +65,7 @@ pub async fn agent_link(
                 )
                     .into_response();
             }
-            let link_query = LinkQuery {
-                token: resolved_token,
-            };
-            ws_upgrade(ws, State(state.link), Query(link_query))
+            ws_upgrade(ws, State(state.link), resolved_token)
                 .await
                 .into_response()
         }

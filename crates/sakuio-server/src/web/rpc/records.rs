@@ -89,9 +89,11 @@ fn point_budget(params: Option<&Value>, fallback: i64) -> i64 {
 }
 
 fn budget_bucket(span_ms: i64, preferred: i64, budget: i64) -> i64 {
-    let needed = (span_ms / budget.max(1)).max(1);
+    // `span_ms / budget` is milliseconds per point; window buckets are in
+    // seconds. Comparing them directly forced every range to a 1-day bucket.
+    let needed_seconds = (span_ms / 1000 / budget.max(1)).max(1);
     for window in [60i64, 300, 3_600, 86_400] {
-        if window >= preferred && window >= needed {
+        if window >= preferred && window >= needed_seconds {
             return window;
         }
     }
@@ -610,8 +612,10 @@ mod budget_tests {
 
     #[test]
     fn budget_bucket_respects_requested_and_budget() {
-        assert_eq!(budget_bucket(3_600_000, 60, 2_000), 3_600);
-        assert_eq!(budget_bucket(86_400_000, 300, 2_000), 86_400);
+        assert_eq!(budget_bucket(3_600_000, 60, 2_000), 60);
+        assert_eq!(budget_bucket(86_400_000, 300, 2_000), 300);
+        assert_eq!(budget_bucket(14_400_000, 300, 2_000), 300);
+        assert_eq!(budget_bucket(604_800_000, 300, 2_000), 3_600);
     }
 
     #[test]
