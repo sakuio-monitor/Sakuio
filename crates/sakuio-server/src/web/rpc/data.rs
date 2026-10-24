@@ -171,7 +171,7 @@ pub fn client_record(row: &PublicClientRow, guest_view: bool, show_partial_ip: b
         "currency": row.currency,
         "expired_at": row.expired_at.clone().unwrap_or_default(),
         "group": row.group_name,
-        "tags": "",
+        "tags": row.tags,
         "hidden": false,
         "traffic_limit": row.traffic_threshold,
         "traffic_limit_type": match row.traffic_stat_mode.as_str() {

@@ -197,6 +197,7 @@ pub static TABLES: &[TableDef] = &[
             def("ipv4", Key, DS("")),
             def("ipv6", Key, DS("")),
             def("group_name", Key, DS("")),
+            def("tags", Key, DS("")),
             def("private_remark", Text, DS("")),
             def("price", Double, DR(0.0)),
             def("billing_cycle", Int, DI(0)),

@@ -45,6 +45,7 @@ pub struct AdminClientRecord {
     pub ipv6: String,
     pub agent_version: Option<String>,
     pub group_name: String,
+    pub tags: String,
     pub private_remark: String,
     pub price: f64,
     pub billing_cycle: i32,
@@ -223,6 +224,7 @@ pub struct PublicClientRow {
     pub region6: String,
     pub agent_version: Option<String>,
     pub group_name: String,
+    pub tags: String,
     pub private_remark: String,
     pub price: f64,
     pub billing_cycle: i32,
@@ -283,6 +285,7 @@ struct PublicClientRowRaw {
     region6: String,
     agent_version: Option<String>,
     group_name: String,
+    tags: String,
     private_remark: String,
     price: f64,
     billing_cycle: i64,
@@ -319,6 +322,7 @@ struct AdminClientRowRaw {
     region6: String,
     agent_version: Option<String>,
     group_name: String,
+    tags: String,
     private_remark: String,
     price: f64,
     billing_cycle: i64,
@@ -356,6 +360,7 @@ fn map_admin_client_row(row: AdminClientRowRaw) -> AdminClientRecord {
         ipv6: row.ipv6,
         agent_version: row.agent_version,
         group_name: row.group_name,
+        tags: row.tags,
         private_remark: row.private_remark,
         price: row.price,
         billing_cycle: i32::try_from(row.billing_cycle).unwrap_or(0),
@@ -389,6 +394,7 @@ fn map_admin_client_row(row: AdminClientRowRaw) -> AdminClientRecord {
 pub struct AdminClientPatch {
     pub name: Option<String>,
     pub group_name: Option<String>,
+    pub tags: Option<String>,
     pub private_remark: Option<String>,
     pub price: Option<f64>,
     pub billing_cycle: Option<i32>,
@@ -433,6 +439,7 @@ fn public_row_from_raw(row: PublicClientRowRaw) -> PublicClientRow {
         region6: row.region6,
         agent_version: row.agent_version,
         group_name: row.group_name,
+        tags: row.tags,
         private_remark: row.private_remark,
         price: row.price,
         billing_cycle: i32::try_from(row.billing_cycle).unwrap_or(0),
@@ -526,7 +533,7 @@ impl<'a> ClientRepository<'a> {
         let rows: Vec<PublicClientRowRaw> = sqlx::query_as(
             "SELECT uuid, name, COALESCE(sort_order, 1e18) AS sort_order, online, disabled, ipv4, ipv6, region, region6,
                     agent_version,
-                    group_name, private_remark, price, billing_cycle, currency,
+                    group_name, tags, private_remark, price, billing_cycle, currency,
                     expired_at, created_at, updated_at, basic_info_json,
                     auto_renewal, traffic_threshold, traffic_stat_mode,
                     traffic_used_up, traffic_used_down, traffic_reset_mode,
@@ -545,7 +552,7 @@ impl<'a> ClientRepository<'a> {
         let row: Option<PublicClientRowRaw> = sqlx::query_as(
             "SELECT uuid, name, COALESCE(sort_order, 1e18) AS sort_order, online, disabled, ipv4, ipv6, region, region6,
                     agent_version,
-                    group_name, private_remark, price, billing_cycle, currency,
+                    group_name, tags, private_remark, price, billing_cycle, currency,
                     expired_at, created_at, updated_at, basic_info_json,
                     auto_renewal, traffic_threshold, traffic_stat_mode,
                     traffic_used_up, traffic_used_down, traffic_reset_mode,
@@ -604,6 +611,7 @@ impl<'a> ClientRepository<'a> {
                    OR LOWER(ipv4) LIKE LOWER(?)
                    OR LOWER(ipv6) LIKE LOWER(?)
                    OR LOWER(group_name) LIKE LOWER(?)
+                   OR LOWER(tags) LIKE LOWER(?)
                    OR LOWER(private_remark) LIKE LOWER(?))"
         } else {
             ""
@@ -615,7 +623,7 @@ impl<'a> ClientRepository<'a> {
             let sql = format!(
                 "SELECT uuid, name, token, online, disabled, ipv4, ipv6, region, region6,
                         agent_version,
-                        group_name, private_remark, price, billing_cycle, currency,
+                        group_name, tags, private_remark, price, billing_cycle, currency,
                         expired_at, last_seen_at, created_at, basic_info_json,
                         auto_renewal, traffic_threshold, traffic_stat_mode,
                         traffic_used_up, traffic_used_down, traffic_cycle_start,
@@ -638,7 +646,7 @@ impl<'a> ClientRepository<'a> {
                 .bind(after_created)
                 .bind(after_uuid);
             if let Some(pattern) = &pattern {
-                for _ in 0..6 {
+                for _ in 0..7 {
                     query = query.bind(pattern);
                 }
             }
@@ -647,7 +655,7 @@ impl<'a> ClientRepository<'a> {
             let sql = format!(
                 "SELECT uuid, name, token, online, disabled, ipv4, ipv6, region, region6,
                         agent_version,
-                        group_name, private_remark, price, billing_cycle, currency,
+                        group_name, tags, private_remark, price, billing_cycle, currency,
                         expired_at, last_seen_at, created_at, basic_info_json,
                         auto_renewal, traffic_threshold, traffic_stat_mode,
                         traffic_used_up, traffic_used_down, traffic_cycle_start,
@@ -661,7 +669,7 @@ impl<'a> ClientRepository<'a> {
             );
             let mut query = sqlx::query_as::<_, AdminClientRowRaw>(&sql);
             if let Some(pattern) = &pattern {
-                for _ in 0..6 {
+                for _ in 0..7 {
                     query = query.bind(pattern);
                 }
             }
@@ -681,7 +689,7 @@ impl<'a> ClientRepository<'a> {
         let count_sql = format!("SELECT COUNT(*) FROM clients WHERE 1 = 1{search_clause}");
         let mut count_query = sqlx::query_as::<_, (i64,)>(&count_sql);
         if let Some(pattern) = &pattern {
-            for _ in 0..6 {
+            for _ in 0..7 {
                 count_query = count_query.bind(pattern);
             }
         }
@@ -845,6 +853,14 @@ impl<'a> ClientRepository<'a> {
         if let Some(group_name) = &patch.group_name {
             sqlx::query("UPDATE clients SET group_name = ?, updated_at = ? WHERE uuid = ?")
                 .bind(group_name)
+                .bind(&now)
+                .bind(uuid)
+                .execute(self.pool)
+                .await?;
+        }
+        if let Some(tags) = &patch.tags {
+            sqlx::query("UPDATE clients SET tags = ?, updated_at = ? WHERE uuid = ?")
+                .bind(tags)
                 .bind(&now)
                 .bind(uuid)
                 .execute(self.pool)
