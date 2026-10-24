@@ -282,6 +282,11 @@ impl fmt::Debug for DbTx<'_> {
 }
 
 impl DbTx<'_> {
+    /// Returns the dialect used by this transaction.
+    pub fn kind(&self) -> DbKind {
+        self.kind
+    }
+
     pub async fn commit(self) -> Result<(), Error> {
         self.inner.commit().await
     }

@@ -350,8 +350,8 @@ pub static TABLES: &[TableDef] = &[
                 &["client_uuid", "observed_at_ms"],
             ),
             idx("idx_ping_records_task_time", &["task_id", "observed_at_ms"]),
-            idx(
-                "idx_ping_records_client_task_time",
+            uniq(
+                "uq_ping_records_client_task_time",
                 &["client_uuid", "task_id", "observed_at_ms"],
             ),
         ],
@@ -764,6 +764,33 @@ pub fn render_create(kind: DbKind, table: &TableDef) -> String {
     render(kind, &create_statement(kind, table, table.name))
 }
 
+/// Removes duplicate raw probes that older versions may have written for the
+/// same client/task/timestamp before the unique index existed.
+/// 删除旧版本可能写入的同一客户端/任务/时间戳的重复原始 Ping 记录。
+pub async fn dedupe_ping_records(pool: &DbPool) -> Result<(), sqlx::Error> {
+    if !table_exists(pool, pool.kind(), "ping_records").await? {
+        return Ok(());
+    }
+    let sql = match pool.kind() {
+        DbKind::Sqlite => {
+            "DELETE FROM ping_records WHERE id NOT IN (\
+             SELECT MIN(id) FROM ping_records GROUP BY client_uuid, task_id, observed_at_ms)"
+        }
+        DbKind::Postgres => {
+            "DELETE FROM ping_records a USING ping_records b \
+             WHERE a.id > b.id AND a.client_uuid = b.client_uuid \
+             AND a.task_id = b.task_id AND a.observed_at_ms = b.observed_at_ms"
+        }
+        DbKind::MySql => {
+            "DELETE a FROM ping_records a INNER JOIN ping_records b \
+             ON a.client_uuid = b.client_uuid AND a.task_id = b.task_id \
+             AND a.observed_at_ms = b.observed_at_ms AND a.id > b.id"
+        }
+    };
+    sqlx::query(sql).execute(pool).await?;
+    Ok(())
+}
+
 /// Ensures every table / index / column exists, additively, on the given pool.
 /// `only` 为空时同步全部表；否则仅同步指定表（独立监控库只需桶/保留表）。
 /// 对给定连接池幂等确保全部表、索引与列存在（只增不改）。
@@ -773,6 +800,23 @@ pub async fn ensure_schema(pool: &DbPool, kind: DbKind, only: &[&str]) -> Result
             continue;
         }
         ensure_table(pool, kind, table, table.name, "").await?;
+    }
+    // The unique client/task/time index replaces the old non-unique one.
+    if index_exists(
+        pool,
+        kind,
+        "ping_records",
+        "idx_ping_records_client_task_time",
+    )
+    .await?
+    {
+        drop_index(
+            pool,
+            kind,
+            "ping_records",
+            "idx_ping_records_client_task_time",
+        )
+        .await?;
     }
     Ok(())
 }

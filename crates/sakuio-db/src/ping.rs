@@ -1,4 +1,4 @@
-use crate::{DbKind, DbPool};
+use crate::{DbKind, DbPool, DbTx};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -34,6 +34,81 @@ pub struct PingRecordRow {
     pub task_id: i64,
     pub time: String,
     pub value: i32,
+}
+
+#[derive(Default)]
+struct PingAgg {
+    samples: i64,
+    valid: i64,
+    loss: i64,
+    sum: f64,
+    sum_sq: f64,
+    min: f64,
+    max: f64,
+}
+
+fn add_ping_agg(agg: &mut PingAgg, value: f64, valid: i64, loss: i64) {
+    if agg.samples == 0 {
+        agg.min = value;
+        agg.max = value;
+    } else {
+        agg.min = agg.min.min(value);
+        agg.max = agg.max.max(value);
+    }
+    agg.samples += 1;
+    agg.valid += valid;
+    agg.loss += loss;
+    agg.sum += value;
+    agg.sum_sq += value * value;
+}
+
+async fn write_ping_rollup(
+    tx: &mut DbTx<'_>,
+    table: &str,
+    bucket_col: &str,
+    rows: &std::collections::HashMap<(i64, String, i64), PingAgg>,
+) -> Result<(), sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    // Chunk both statements and binds: 200 rows * 10 params exceeds SQLite's
+    // 999-variable limit, while 90 is safely below it.
+    let mut all: Vec<(&i64, &String, &i64, &PingAgg)> =
+        rows.iter().map(|(k, v)| (&k.0, &k.1, &k.2, v)).collect();
+    all.sort_by_key(|(_, client, start, _)| (*start, client.as_str()));
+    for chunk in all.chunks(90) {
+        let values = vec!["(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"; chunk.len()].join(", ");
+        let conflict = match tx.kind() {
+            DbKind::MySql => format!(
+                "ON DUPLICATE KEY UPDATE samples = {table}.samples + VALUES(samples),                  valid = {table}.valid + VALUES(valid), loss_count = {table}.loss_count + VALUES(loss_count),                  sum_ms = {table}.sum_ms + VALUES(sum_ms), sum_sq_ms = {table}.sum_sq_ms + VALUES(sum_sq_ms),                  min_ms = LEAST({table}.min_ms, VALUES(min_ms)), max_ms = GREATEST({table}.max_ms, VALUES(max_ms))"
+            ),
+            DbKind::Postgres => format!(
+                "ON CONFLICT (task_id, client_uuid, {bucket_col}) DO UPDATE SET                  samples = {table}.samples + excluded.samples, valid = {table}.valid + excluded.valid,                  loss_count = {table}.loss_count + excluded.loss_count, sum_ms = {table}.sum_ms + excluded.sum_ms,                  sum_sq_ms = {table}.sum_sq_ms + excluded.sum_sq_ms,                  min_ms = LEAST({table}.min_ms, excluded.min_ms), max_ms = GREATEST({table}.max_ms, excluded.max_ms)"
+            ),
+            DbKind::Sqlite => format!(
+                "ON CONFLICT (task_id, client_uuid, {bucket_col}) DO UPDATE SET                  samples = {table}.samples + excluded.samples, valid = {table}.valid + excluded.valid,                  loss_count = {table}.loss_count + excluded.loss_count, sum_ms = {table}.sum_ms + excluded.sum_ms,                  sum_sq_ms = {table}.sum_sq_ms + excluded.sum_sq_ms,                  min_ms = MIN({table}.min_ms, excluded.min_ms), max_ms = MAX({table}.max_ms, excluded.max_ms)"
+            ),
+        };
+        let sql = format!(
+            "INSERT INTO {table} (task_id, client_uuid, {bucket_col}, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms)              VALUES {values} {conflict}"
+        );
+        let mut query = sqlx::query(&sql);
+        for (task, client, start, agg) in chunk {
+            query = query
+                .bind(**task)
+                .bind(*client)
+                .bind(**start)
+                .bind(agg.samples)
+                .bind(agg.valid)
+                .bind(agg.loss)
+                .bind(agg.sum)
+                .bind(agg.sum_sq)
+                .bind(agg.min)
+                .bind(agg.max);
+        }
+        query.execute(&mut *tx).await?;
+    }
+    Ok(())
 }
 
 pub struct PingRepository<'a> {
@@ -218,6 +293,7 @@ impl<'a> PingRepository<'a> {
         Ok(changed)
     }
 
+    /// Inserts one probe and its minute/hour rollups in a single transaction.
     pub async fn insert_record(
         &self,
         client_uuid: &str,
@@ -225,96 +301,116 @@ impl<'a> PingRepository<'a> {
         value_ms: i32,
         observed_at_ms: i64,
     ) -> PingDbResult<()> {
-        if crate::maintenance_active() {
+        self.insert_records(&[(client_uuid.to_string(), task_id, value_ms, observed_at_ms)])
+            .await
+    }
+
+    /// Batches raw probes and their minute/hour rollups into one transaction.
+    /// The public API sees the raw row and all rollups at the same commit.
+    pub async fn insert_records(&self, records: &[(String, i64, i32, i64)]) -> PingDbResult<()> {
+        if records.is_empty() || crate::maintenance_active() {
             return Ok(());
         }
-        sqlx::query(
-            "INSERT INTO ping_records (client_uuid, task_id, observed_at_ms, value_ms) VALUES (?, ?, ?, ?)",
-        )
-        .bind(client_uuid)
-        .bind(task_id)
-        .bind(observed_at_ms)
-        .bind(value_ms)
-        .execute(self.pool)
-        .await?;
-        self.rollup_ping(client_uuid, task_id, observed_at_ms, value_ms)
-            .await?;
-        self.rollup_minute(client_uuid, task_id, observed_at_ms, value_ms)
-            .await?;
-        Ok(())
-    }
+        // Dedupe before both writes: the raw INSERT may ignore a duplicate,
+        // but the rollups must not count it twice.
+        let mut seen = std::collections::HashSet::new();
+        let mut unique: Vec<&(String, i64, i32, i64)> = records
+            .iter()
+            .filter(|(client, task, _, observed)| seen.insert((client.as_str(), *task, *observed)))
+            .collect();
+        let mut tx = self.pool.begin().await?;
 
-    async fn rollup_ping(
-        &self,
-        client_uuid: &str,
-        task_id: i64,
-        observed_at_ms: i64,
-        value_ms: i32,
-    ) -> PingDbResult<()> {
-        let hour = observed_at_ms - observed_at_ms.rem_euclid(3_600_000);
-        let valid = if value_ms >= 0 { 1 } else { 0 };
-        let loss = 1 - valid;
-        let value = value_ms.max(0) as f64;
-        let sql = match self.pool.kind() {
-            DbKind::MySql => "INSERT INTO ping_rollup_hourly (task_id, client_uuid, hour_start_ms, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE samples = samples + 1, valid = valid + VALUES(valid), loss_count = loss_count + VALUES(loss_count), sum_ms = sum_ms + VALUES(sum_ms), sum_sq_ms = sum_sq_ms + VALUES(sum_sq_ms), min_ms = LEAST(min_ms, VALUES(min_ms)), max_ms = GREATEST(max_ms, VALUES(max_ms))",
-            DbKind::Postgres => "INSERT INTO ping_rollup_hourly (task_id, client_uuid, hour_start_ms, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) ON CONFLICT (task_id, client_uuid, hour_start_ms) DO UPDATE SET samples = ping_rollup_hourly.samples + 1, valid = ping_rollup_hourly.valid + excluded.valid, loss_count = ping_rollup_hourly.loss_count + excluded.loss_count, sum_ms = ping_rollup_hourly.sum_ms + excluded.sum_ms, sum_sq_ms = ping_rollup_hourly.sum_sq_ms + excluded.sum_sq_ms, min_ms = LEAST(ping_rollup_hourly.min_ms, excluded.min_ms), max_ms = GREATEST(ping_rollup_hourly.max_ms, excluded.max_ms)",
-            DbKind::Sqlite => "INSERT INTO ping_rollup_hourly (task_id, client_uuid, hour_start_ms, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) ON CONFLICT (task_id, client_uuid, hour_start_ms) DO UPDATE SET samples = ping_rollup_hourly.samples + 1, valid = ping_rollup_hourly.valid + excluded.valid, loss_count = ping_rollup_hourly.loss_count + excluded.loss_count, sum_ms = ping_rollup_hourly.sum_ms + excluded.sum_ms, sum_sq_ms = ping_rollup_hourly.sum_sq_ms + excluded.sum_sq_ms, min_ms = MIN(ping_rollup_hourly.min_ms, excluded.min_ms), max_ms = MAX(ping_rollup_hourly.max_ms, excluded.max_ms)",
-        };
-        sqlx::query(sql)
-            .bind(task_id)
-            .bind(client_uuid)
-            .bind(hour)
-            .bind(valid)
-            .bind(loss)
-            .bind(value)
-            .bind(value * value)
-            .bind(value)
-            .bind(value)
-            .execute(self.pool)
-            .await?;
-        Ok(())
-    }
+        // A retried agent batch can contain timestamps that are already in
+        // the raw table. The raw INSERT ignores them, but additive rollups
+        // must not count them again. Read the affected keys inside the same
+        // transaction and aggregate only genuinely new probes.
+        let mut existing = std::collections::HashSet::new();
+        let min_observed = unique.iter().map(|r| r.3).min().unwrap_or(0);
+        let max_observed = unique.iter().map(|r| r.3).max().unwrap_or(0);
+        let task_ids: Vec<i64> = unique
+            .iter()
+            .map(|r| r.1)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        if !task_ids.is_empty() {
+            let placeholders = vec!["?"; task_ids.len()].join(",");
+            let sql = format!(
+                "SELECT client_uuid, task_id, observed_at_ms FROM ping_records \
+                 WHERE observed_at_ms >= ? AND observed_at_ms <= ? AND task_id IN ({placeholders})"
+            );
+            let mut q = sqlx::query_as::<_, (String, i64, i64)>(&sql)
+                .bind(min_observed)
+                .bind(max_observed);
+            for task in &task_ids {
+                q = q.bind(task);
+            }
+            for (client, task, observed) in q.fetch_all(&mut tx).await? {
+                existing.insert((client, task, observed));
+            }
+        }
+        unique.retain(|(client, task, _, observed)| {
+            !existing.contains(&(client.clone(), *task, *observed))
+        });
 
-    async fn rollup_minute(
-        &self,
-        client_uuid: &str,
-        task_id: i64,
-        observed_at_ms: i64,
-        value_ms: i32,
-    ) -> PingDbResult<()> {
-        let minute = observed_at_ms - observed_at_ms.rem_euclid(60_000);
-        let valid = if value_ms >= 0 { 1 } else { 0 };
-        let loss = 1 - valid;
-        let value = value_ms.max(0) as f64;
-        let sql = match self.pool.kind() {
-            DbKind::MySql => "INSERT INTO ping_minute_rollup (task_id, client_uuid, minute_start_ms, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE samples = samples + 1, valid = valid + VALUES(valid), loss_count = loss_count + VALUES(loss_count), sum_ms = sum_ms + VALUES(sum_ms), sum_sq_ms = sum_sq_ms + VALUES(sum_sq_ms), min_ms = LEAST(min_ms, VALUES(min_ms)), max_ms = GREATEST(max_ms, VALUES(max_ms))",
-            DbKind::Postgres => "INSERT INTO ping_minute_rollup (task_id, client_uuid, minute_start_ms, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) ON CONFLICT (task_id, client_uuid, minute_start_ms) DO UPDATE SET samples = ping_minute_rollup.samples + 1, valid = ping_minute_rollup.valid + excluded.valid, loss_count = ping_minute_rollup.loss_count + excluded.loss_count, sum_ms = ping_minute_rollup.sum_ms + excluded.sum_ms, sum_sq_ms = ping_minute_rollup.sum_sq_ms + excluded.sum_sq_ms, min_ms = LEAST(ping_minute_rollup.min_ms, excluded.min_ms), max_ms = GREATEST(ping_minute_rollup.max_ms, excluded.max_ms)",
-            DbKind::Sqlite => "INSERT INTO ping_minute_rollup (task_id, client_uuid, minute_start_ms, samples, valid, loss_count, sum_ms, sum_sq_ms, min_ms, max_ms) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) ON CONFLICT (task_id, client_uuid, minute_start_ms) DO UPDATE SET samples = ping_minute_rollup.samples + 1, valid = ping_minute_rollup.valid + excluded.valid, loss_count = ping_minute_rollup.loss_count + excluded.loss_count, sum_ms = ping_minute_rollup.sum_ms + excluded.sum_ms, sum_sq_ms = ping_minute_rollup.sum_sq_ms + excluded.sum_sq_ms, min_ms = MIN(ping_minute_rollup.min_ms, excluded.min_ms), max_ms = MAX(ping_minute_rollup.max_ms, excluded.max_ms)",
-        };
-        sqlx::query(sql)
-            .bind(task_id)
-            .bind(client_uuid)
-            .bind(minute)
-            .bind(valid)
-            .bind(loss)
-            .bind(value)
-            .bind(value * value)
-            .bind(value)
-            .bind(value)
-            .execute(self.pool)
-            .await?;
+        // Raw probes. Keep the multi-row statement bounded so every dialect
+        // stays below its bind-parameter limit.
+        for chunk in unique.chunks(200) {
+            let values = vec!["(?, ?, ?, ?)"; chunk.len()].join(", ");
+            let sql = match self.pool.kind() {
+                DbKind::MySql => format!(
+                    "INSERT IGNORE INTO ping_records (client_uuid, task_id, observed_at_ms, value_ms) \
+                     VALUES {values}"
+                ),
+                _ => format!(
+                    "INSERT INTO ping_records (client_uuid, task_id, observed_at_ms, value_ms) \
+                     VALUES {values} ON CONFLICT (client_uuid, task_id, observed_at_ms) DO NOTHING"
+                ),
+            };
+            let mut query = sqlx::query(&sql);
+            for (client, task, value, observed) in chunk {
+                query = query.bind(client).bind(task).bind(observed).bind(value);
+            }
+            query.execute(&mut tx).await?;
+        }
+
+        let mut minute = std::collections::HashMap::new();
+        let mut hour = std::collections::HashMap::new();
+        for (client, task, value_ms, observed) in &unique {
+            let value = (*value_ms).max(0) as f64;
+            let valid = i64::from(*value_ms >= 0);
+            let loss = 1 - valid;
+            let hour_start = observed - observed.rem_euclid(3_600_000);
+            let minute_start = observed - observed.rem_euclid(60_000);
+            add_ping_agg(
+                hour.entry((*task, client.clone(), hour_start)).or_default(),
+                value,
+                valid,
+                loss,
+            );
+            add_ping_agg(
+                minute
+                    .entry((*task, client.clone(), minute_start))
+                    .or_default(),
+                value,
+                valid,
+                loss,
+            );
+        }
+        write_ping_rollup(&mut tx, "ping_minute_rollup", "minute_start_ms", &minute).await?;
+        write_ping_rollup(&mut tx, "ping_rollup_hourly", "hour_start_ms", &hour).await?;
+        tx.commit().await?;
         Ok(())
     }
 
     /// One-time migration for raw probes written by older versions.
     pub async fn backfill_minute_rollups(&self) -> PingDbResult<u64> {
         let cutoff = chrono::Utc::now().timestamp_millis() - 10 * 60_000;
-        let existing: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM ping_minute_rollup WHERE minute_start_ms < ?",
-        )
-        .bind(cutoff)
-        .fetch_one(self.pool)
-        .await?;
+        let existing: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM ping_minute_rollup WHERE minute_start_ms < ?")
+                .bind(cutoff)
+                .fetch_one(self.pool)
+                .await?;
         if existing > 0 {
             return Ok(0);
         }
@@ -357,8 +453,16 @@ impl<'a> PingRepository<'a> {
         until_ms: i64,
         limit: i32,
     ) -> PingDbResult<Vec<PingRecordRow>> {
-        self.list_rollups("ping_minute_rollup", "minute_start_ms", client_uuid, task_id, since_ms, until_ms, limit)
-            .await
+        self.list_rollups(
+            "ping_minute_rollup",
+            "minute_start_ms",
+            client_uuid,
+            task_id,
+            since_ms,
+            until_ms,
+            limit,
+        )
+        .await
     }
 
     /// Reads hourly rollups and converts them to the Ping record shape.
@@ -370,8 +474,16 @@ impl<'a> PingRepository<'a> {
         until_ms: i64,
         limit: i32,
     ) -> PingDbResult<Vec<PingRecordRow>> {
-        self.list_rollups("ping_rollup_hourly", "hour_start_ms", client_uuid, task_id, since_ms, until_ms, limit)
-            .await
+        self.list_rollups(
+            "ping_rollup_hourly",
+            "hour_start_ms",
+            client_uuid,
+            task_id,
+            since_ms,
+            until_ms,
+            limit,
+        )
+        .await
     }
 
     async fn list_rollups(
@@ -395,7 +507,9 @@ impl<'a> PingRepository<'a> {
             sql.push_str(" AND task_id = ?");
         }
         sql.push_str(&format!(" ORDER BY {time_col} DESC LIMIT ?"));
-        let mut q = sqlx::query_as::<_, (String, i64, i64, i64, f64)>(&sql).bind(since_ms).bind(until_ms);
+        let mut q = sqlx::query_as::<_, (String, i64, i64, i64, f64)>(&sql)
+            .bind(since_ms)
+            .bind(until_ms);
         if let Some(uuid) = client_uuid {
             q = q.bind(uuid);
         }
@@ -409,7 +523,11 @@ impl<'a> PingRepository<'a> {
             .map(|(client, task, ms, valid, sum)| PingRecordRow {
                 client,
                 task_id: task,
-                value: if valid > 0 { (sum / valid as f64).round() as i32 } else { -1 },
+                value: if valid > 0 {
+                    (sum / valid as f64).round() as i32
+                } else {
+                    -1
+                },
                 time: ms_to_rfc3339(ms),
             })
             .collect())

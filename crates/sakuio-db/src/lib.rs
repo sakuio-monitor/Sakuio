@@ -141,6 +141,9 @@ impl AppDatabase {
         )
         .await
         .map_err(|e| DbError::Message(format!("connect app database: {e}")))?;
+        schema::dedupe_ping_records(&pool)
+            .await
+            .map_err(|e| DbError::Message(format!("dedupe ping records: {e}")))?;
         schema::ensure_schema(&pool, kind, &[])
             .await
             .map_err(|e| DbError::Message(format!("ensure schema: {e}")))?;
