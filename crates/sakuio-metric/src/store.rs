@@ -588,36 +588,17 @@ impl MetricStore {
     /// SQLite need VACUUM; MySQL needs OPTIMIZE TABLE. This runs in the metric
     /// cleanup task, never on the request path.
     pub async fn reclaim_space(&self) -> Result<(), MetricError> {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        static FIRST_RECLAIM: AtomicBool = AtomicBool::new(true);
-        let first = FIRST_RECLAIM.swap(false, Ordering::Relaxed);
+        // Never run VACUUM FULL / OPTIMIZE TABLE from the server loop: those
+        // take exclusive locks and stall the metric writer for seconds. The
+        // periodic pass only updates planner statistics; a one-off compact is
+        // an explicit maintenance action.
         let table = self.table("buckets");
-        match self.dialect {
-            DbKind::Sqlite => {
-                // VACUUM cannot run concurrently; one pass per process is
-                // enough to return space after a large cleanup.
-                if first {
-                    sqlx::query("VACUUM").execute(&self.pool).await?;
-                }
-            }
-            DbKind::MySql => {
-                if first {
-                    sqlx::query(&format!("OPTIMIZE TABLE {table}"))
-                        .execute(&self.pool)
-                        .await?;
-                }
-            }
-            DbKind::Postgres => {
-                // First pass after deploy compacts the table; later passes are
-                // cheap ANALYZE because FULL takes an exclusive lock.
-                let sql = if first {
-                    format!("VACUUM (FULL, ANALYZE) {table}")
-                } else {
-                    format!("VACUUM (ANALYZE) {table}")
-                };
-                sqlx::query(&sql).execute(&self.pool).await?;
-            }
-        }
+        let sql = match self.dialect {
+            DbKind::Postgres => format!("VACUUM (ANALYZE) {table}"),
+            DbKind::MySql => format!("ANALYZE TABLE {table}"),
+            DbKind::Sqlite => format!("ANALYZE {table}"),
+        };
+        sqlx::query(&sql).execute(&self.pool).await?;
         Ok(())
     }
 

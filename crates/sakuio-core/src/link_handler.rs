@@ -27,6 +27,7 @@ pub struct LinkSessionHandler {
     ingest: IngestPipeline,
     remote: Option<Arc<RemoteHub>>,
     geo_wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    last_seen_write: tokio::sync::Mutex<std::time::Instant>,
 }
 
 impl LinkSessionHandler {
@@ -40,6 +41,10 @@ impl LinkSessionHandler {
             ingest,
             remote: None,
             geo_wake: None,
+            // Avoid one UPDATE per 1s telemetry batch for every node.
+            last_seen_write: tokio::sync::Mutex::new(
+                std::time::Instant::now() - std::time::Duration::from_secs(60),
+            ),
         }
     }
 
@@ -301,19 +306,26 @@ impl BoardSessionHandler for LinkSessionHandler {
             .await
             .map_err(state_err)?;
         let clients = ClientRepository::new(&self.db);
-        // One UPDATE per batch covers last_seen and the cumulative snapshot.
-        if let Some(sample) = batch.samples.last() {
-            let _ = clients
-                .touch_last_seen_with_runtime(
-                    node_uuid,
-                    sample.network.total_up,
-                    sample.network.total_down,
-                    sample.uptime,
-                )
-                .await;
-        } else {
-            let _ = clients.touch_last_seen(node_uuid).await;
+        // last_seen is for display only; online state is driven by the board
+        // presence. Throttle it so 1s telemetry does not produce 1 DB commit
+        // per node per second.
+        let mut last_write = self.last_seen_write.lock().await;
+        if last_write.elapsed() >= std::time::Duration::from_secs(10) {
+            if let Some(sample) = batch.samples.last() {
+                let _ = clients
+                    .touch_last_seen_with_runtime(
+                        node_uuid,
+                        sample.network.total_up,
+                        sample.network.total_down,
+                        sample.uptime,
+                    )
+                    .await;
+            } else {
+                let _ = clients.touch_last_seen(node_uuid).await;
+            }
+            *last_write = std::time::Instant::now();
         }
+        drop(last_write);
         tracing::debug!(
             node_uuid = %node_uuid,
             batch_seq,

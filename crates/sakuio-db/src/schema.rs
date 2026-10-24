@@ -287,15 +287,6 @@ pub static TABLES: &[TableDef] = &[
                 ],
             ),
             idx(
-                "idx_metric_buckets_node_metric",
-                &[
-                    "node_uuid",
-                    "bucket_seconds",
-                    "metric_key",
-                    "bucket_start_ms",
-                ],
-            ),
-            idx(
                 "idx_metric_buckets_node_window_time",
                 &["node_uuid", "bucket_seconds", "bucket_start_ms"],
             ),
@@ -796,6 +787,18 @@ pub async fn ensure_metric_schema(pool: &DbPool, prefix: &str) -> Result<(), sql
         let suffix = &table.name["metric_".len()..];
         let physical = format!("{prefix}{suffix}");
         ensure_table(pool, kind, table, &physical, &prefix).await?;
+    }
+    // Remove indexes from the old schema that are no longer used. Their
+    // queries are served by the (node, metric, window, time) unique index and
+    // the (node, window, time) index.
+    let buckets = format!("{prefix}buckets");
+    for legacy in [
+        "idx_metric_buckets_node_metric",
+        "metric_idx_metric_buckets_node_metric",
+    ] {
+        if index_exists(pool, kind, &buckets, legacy).await? {
+            drop_index(pool, kind, &buckets, legacy).await?;
+        }
     }
     crate::metric_storage::ensure_timescale(pool, &prefix).await?;
     Ok(())
