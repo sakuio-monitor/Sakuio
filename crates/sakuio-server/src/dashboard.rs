@@ -194,6 +194,21 @@ impl DashboardService {
             tokio::spawn(async move {
                 let _ = service.refresh(&code).await;
             });
+        } else if display_range != "custom"
+            && meta
+                .as_ref()
+                .is_some_and(|(_, generated_at, _, _)| {
+                    now_ms().saturating_sub(*generated_at) > 300_000
+                })
+        {
+            // A range switch must not show a snapshot from an hour ago (the
+            // long-range refresher runs hourly). Refresh before reading it.
+            match self.refresh(range).await {
+                Ok(()) => return Box::pin(self.bootstrap_code(range, display_range)).await,
+                Err(error) => {
+                    tracing::warn!(range, error = %error, "dashboard refresh on request failed");
+                }
+            }
         }
         let (revision, generated_at, _coverage_start, status) =
             meta.unwrap_or((0, 0, 0, "warming".to_string()));
@@ -309,10 +324,10 @@ impl DashboardService {
                 }));
             }
         }
-        sort_by_number(&mut top_traffic, "total");
-        sort_by_number(&mut top_cpu, "value");
-        sort_by_number(&mut top_mem, "value");
-        sort_by_number(&mut disk_pressure, "percent");
+        sort_by_number_desc(&mut top_traffic, "total");
+        sort_by_number_desc(&mut top_cpu, "value");
+        sort_by_number_desc(&mut top_mem, "value");
+        sort_by_number_desc(&mut disk_pressure, "percent");
 
         let capacity = meta_map.values().fold((0i64, 0i64, 0i64), |acc, node| {
             (
@@ -1083,18 +1098,18 @@ fn now_ms() -> i64 {
 
 fn sort_by_number(items: &mut [Value], key: &str) {
     items.sort_by(|a, b| {
-        b.get(key)
+        a.get(key)
             .and_then(Value::as_f64)
-            .partial_cmp(&a.get(key).and_then(Value::as_f64))
+            .partial_cmp(&b.get(key).and_then(Value::as_f64))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 }
 
 fn sort_by_number_desc(items: &mut [Value], key: &str) {
     items.sort_by(|a, b| {
-        a.get(key)
+        b.get(key)
             .and_then(Value::as_f64)
-            .partial_cmp(&b.get(key).and_then(Value::as_f64))
+            .partial_cmp(&a.get(key).and_then(Value::as_f64))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 }
@@ -1122,4 +1137,27 @@ async fn main_db_size(pool: &DbPool) -> u64 {
         .filter(|v| *v > 0)
         .map(|v| v as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn volatility_sorts_ascending_for_stable_and_descending_for_unstable() {
+        let mut stable = vec![
+            json!({"volatility": 19.7}),
+            json!({"volatility": 1.08}),
+            json!({"volatility": 0.0}),
+        ];
+        sort_by_number(&mut stable, "volatility");
+        assert_eq!(stable[0]["volatility"], json!(0.0));
+        assert_eq!(stable[2]["volatility"], json!(19.7));
+
+        let mut unstable = stable.clone();
+        sort_by_number_desc(&mut unstable, "volatility");
+        assert_eq!(unstable[0]["volatility"], json!(19.7));
+        assert_eq!(unstable[2]["volatility"], json!(0.0));
+    }
 }

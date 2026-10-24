@@ -279,10 +279,10 @@ fn traffic_delta(state: &mut NodeWindows, sample: &TelemetrySample) -> TrafficDe
         let (up, down) = if sample.network.total_up < state.last_totals.0
             || sample.network.total_down < state.last_totals.1
         {
-            (
-                sample.network.total_up as f64,
-                sample.network.total_down as f64,
-            )
+            // Agent counters reset monthly (and on reboot). The new value is
+            // the whole month/boot total; counting it as one delta produced
+            // hundreds of GB of fake 24h traffic. Start a fresh baseline.
+            (0.0, 0.0)
         } else {
             (
                 sample.network.total_up.saturating_sub(state.last_totals.0) as f64,
