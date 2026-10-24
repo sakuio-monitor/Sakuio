@@ -4,11 +4,19 @@ use sakuio_board::{BoardStateStore, RECENT_TELEMETRY_MS};
 use sakuio_db::ClientRepository;
 use sakuio_protocol::{BasicInfoParams, TelemetrySample};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Mutex;
 
 use super::data::{load_public_clients, parse_basic, v2_report_from_snapshot};
 use super::ping::{
     parse_ping_hours, parse_ping_max_count, parse_task_id, query_ping_records, PingQuery,
 };
+
+static RECENT_STATUS_CACHE: OnceLock<Mutex<HashMap<(String, i64, i64, i64), Arc<Value>>>> =
+    OnceLock::new();
+static RECENT_REPORTS_CACHE: OnceLock<Mutex<HashMap<(String, i64, i64, String), Arc<Value>>>> =
+    OnceLock::new();
 
 pub async fn common_get_node_recent_status(
     state: &AppState,
@@ -27,22 +35,40 @@ pub async fn common_get_node_recent_status(
         .list_recent_telemetry(uuid, since)
         .await
         .map_err(|_| (-32603, "Internal error"))?;
+    let limit = params
+        .and_then(|p| p.get("limit"))
+        .and_then(|l| l.as_i64())
+        .unwrap_or(0);
+    let signature = (
+        uuid.to_string(),
+        samples.last().map(|s| s.observed_at_ms).unwrap_or(0),
+        samples.len() as i64,
+        limit,
+    );
+    let cache = RECENT_STATUS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(value) = cache.lock().await.get(&signature) {
+        return Ok((**value).clone());
+    }
 
     let mut records: Vec<Value> = samples
         .iter()
         .map(|s| sample_to_status_record(uuid, s))
         .collect();
 
-    if let Some(limit) = params.and_then(|p| p.get("limit")).and_then(|l| l.as_i64()) {
-        if limit > 0 && records.len() > limit as usize {
-            records = records.split_off(records.len() - limit as usize);
-        }
+    if limit > 0 && records.len() > limit as usize {
+        records = records.split_off(records.len() - limit as usize);
     }
 
-    Ok(json!({
+    let value = json!({
         "count": records.len(),
         "records": records,
-    }))
+    });
+    let mut cache = cache.lock().await;
+    if cache.len() > 512 {
+        cache.clear();
+    }
+    cache.insert(signature, Arc::new(value.clone()));
+    Ok(value)
 }
 
 pub async fn public_get_client_recent_records(
@@ -68,13 +94,29 @@ pub async fn public_get_client_recent_records(
         .list_recent_telemetry(uuid, since)
         .await
         .map_err(|_| (-32603, "Internal error"))?;
+    let signature = (
+        uuid.to_string(),
+        samples.last().map(|s| s.observed_at_ms).unwrap_or(0),
+        samples.len() as i64,
+        row.updated_at.clone(),
+    );
+    let cache = RECENT_REPORTS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(value) = cache.lock().await.get(&signature) {
+        return Ok((**value).clone());
+    }
 
     let basic = parse_basic(&row);
     let reports: Vec<Value> = samples
         .iter()
         .map(|s| v2_report_from_sample(s, &basic))
         .collect();
-    Ok(Value::Array(reports))
+    let value = Value::Array(reports);
+    let mut cache = cache.lock().await;
+    if cache.len() > 512 {
+        cache.clear();
+    }
+    cache.insert(signature, Arc::new(value.clone()));
+    Ok(value)
 }
 
 const DEFAULT_POINT_BUDGET: i64 = 2_000;
