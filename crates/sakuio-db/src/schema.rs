@@ -898,6 +898,74 @@ async fn remove_id_column(
     Ok(())
 }
 
+/// Recovers a partially completed dictionary migration. The failed 0.0.13
+/// startup renamed the old table to metric_buckets__legacy_dict before the
+/// copy failed, so the legacy rows must be imported into the new table.
+pub async fn recover_legacy_dictionary(pool: &DbPool, prefix: &str) -> Result<(), sqlx::Error> {
+    let prefix = validate_prefix(prefix)?;
+    let kind = pool.kind();
+    let legacy = format!("{prefix}buckets__legacy_dict");
+    if !table_exists(pool, kind, &legacy).await? {
+        return Ok(());
+    }
+    for name in ["metric_nodes", "metric_keys", "metric_series"] {
+        let def = TABLES.iter().find(|t| t.name == name).unwrap();
+        let physical = format!("{prefix}{}", &name["metric_".len()..]);
+        ensure_table(pool, kind, def, &physical, &prefix).await?;
+    }
+    let buckets = format!("{prefix}buckets");
+    if !table_exists(pool, kind, &buckets).await? {
+        let def = TABLES.iter().find(|t| t.name == "metric_buckets").unwrap();
+        let ddl = render(kind, &create_statement(kind, def, &buckets));
+        sqlx::query(&ddl).execute(pool).await?;
+    }
+    let nodes = format!("{prefix}nodes");
+    let keys = format!("{prefix}keys");
+    let series = format!("{prefix}series");
+    let insert = match kind {
+        DbKind::MySql => "INSERT IGNORE",
+        DbKind::Sqlite => "INSERT OR IGNORE",
+        DbKind::Postgres => "INSERT",
+    };
+    let suffix = if kind == DbKind::Postgres {
+        " ON CONFLICT DO NOTHING"
+    } else {
+        ""
+    };
+    for (target, source, column) in [(&nodes, "node_uuid", "uuid"), (&keys, "metric_key", "metric_key")] {
+        sqlx::query(&format!(
+            "{insert} INTO {target} ({column}) SELECT DISTINCT {source} FROM {legacy}{suffix}"
+        ))
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query(&format!(
+        "{insert} INTO {series} (node_id, metric_id) SELECT DISTINCT n.id, k.id \
+         FROM {legacy} b JOIN {nodes} n ON n.uuid = b.node_uuid \
+         JOIN {keys} k ON k.metric_key = b.metric_key{suffix}"
+    ))
+    .execute(pool)
+    .await?;
+    let conflict = if kind == DbKind::MySql {
+        "ON DUPLICATE KEY UPDATE avg_val = VALUES(avg_val), min_val = VALUES(min_val), max_val = VALUES(max_val), sample_count = VALUES(sample_count)"
+    } else {
+        "ON CONFLICT (series_id, bucket_seconds, bucket_start_ms) DO UPDATE SET avg_val = excluded.avg_val, min_val = excluded.min_val, max_val = excluded.max_val, sample_count = excluded.sample_count"
+    };
+    sqlx::query(&format!(
+        "INSERT INTO {buckets} (series_id, bucket_seconds, bucket_start_ms, avg_val, min_val, max_val, sample_count, sum_sq, variance, p50_val, p95_val, p99_val) \
+         SELECT s.id, b.bucket_seconds, b.bucket_start_ms, b.avg_val, b.min_val, b.max_val, b.sample_count, b.sum_sq, b.variance, b.p50_val, b.p95_val, b.p99_val \
+         FROM {legacy} b JOIN {nodes} n ON n.uuid = b.node_uuid \
+         JOIN {keys} k ON k.metric_key = b.metric_key \
+         JOIN {series} s ON s.node_id = n.id AND s.metric_id = k.id {conflict}"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::query(&format!("DROP TABLE {legacy}"))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Migrates string-keyed metric buckets into node/metric series dictionaries.
 pub async fn migrate_metric_dictionary(pool: &DbPool, prefix: &str) -> Result<(), sqlx::Error> {
     let prefix = validate_prefix(prefix)?;
@@ -964,8 +1032,9 @@ pub async fn migrate_metric_dictionary(pool: &DbPool, prefix: &str) -> Result<()
     let copy = format!(
         "INSERT INTO {buckets} (series_id, bucket_seconds, bucket_start_ms, avg_val, min_val, max_val, sample_count, sum_sq, variance, p50_val, p95_val, p99_val) \
          SELECT s.id, b.bucket_seconds, b.bucket_start_ms, b.avg_val, b.min_val, b.max_val, b.sample_count, b.sum_sq, b.variance, b.p50_val, b.p95_val, b.p99_val \
-         FROM {old} b JOIN {series} s JOIN {nodes} n ON n.id = s.node_id AND n.uuid = b.node_uuid \
-         JOIN {keys} k ON k.id = s.metric_id AND k.metric_key = b.metric_key"
+         FROM {old} b JOIN {nodes} n ON n.uuid = b.node_uuid \
+         JOIN {keys} k ON k.metric_key = b.metric_key \
+         JOIN {series} s ON s.node_id = n.id AND s.metric_id = k.id"
     );
     sqlx::query(&copy).execute(pool).await?;
     sqlx::query(&format!("DROP TABLE {old}"))
@@ -1001,6 +1070,7 @@ pub async fn ensure_metric_view(pool: &DbPool, prefix: &str) -> Result<(), sqlx:
 /// `only` 为空时同步全部表；否则仅同步指定表（独立监控库只需桶/保留表）。
 /// 对给定连接池幂等确保全部表、索引与列存在（只增不改）。
 pub async fn ensure_schema(pool: &DbPool, kind: DbKind, only: &[&str]) -> Result<(), sqlx::Error> {
+    recover_legacy_dictionary(pool, "metric_").await?;
     migrate_metric_dictionary(pool, "metric_").await?;
     for table in TABLES {
         if !only.is_empty() && !only.contains(&table.name) {
@@ -1035,6 +1105,7 @@ pub async fn ensure_schema(pool: &DbPool, kind: DbKind, only: &[&str]) -> Result
 pub async fn ensure_metric_schema(pool: &DbPool, prefix: &str) -> Result<(), sqlx::Error> {
     let prefix = validate_prefix(prefix)?;
     let kind = pool.kind();
+    recover_legacy_dictionary(pool, &prefix).await?;
     migrate_metric_dictionary(pool, &prefix).await?;
     migrate_legacy_ids(pool).await?;
     for table in TABLES.iter().filter(|t| t.name.starts_with("metric_")) {

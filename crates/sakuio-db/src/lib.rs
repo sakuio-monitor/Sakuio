@@ -144,6 +144,9 @@ impl AppDatabase {
         schema::dedupe_ping_records(&pool)
             .await
             .map_err(|e| DbError::Message(format!("dedupe ping records: {e}")))?;
+        schema::recover_legacy_dictionary(&pool, "metric_")
+            .await
+            .map_err(|e| DbError::Message(format!("recover metric dictionary: {e}")))?;
         schema::migrate_metric_dictionary(&pool, "metric_")
             .await
             .map_err(|e| DbError::Message(format!("migrate metric dictionary: {e}")))?;
