@@ -32,6 +32,7 @@ pub struct LinkSessionHandler {
     remote: Option<Arc<RemoteHub>>,
     geo_wake: Option<Arc<dyn Fn() + Send + Sync>>,
     last_seen_write: tokio::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    pending_last_seen: Arc<tokio::sync::Mutex<std::collections::HashMap<String, (u64, u64, u64)>>>,
 }
 
 impl LinkSessionHandler {
@@ -39,6 +40,35 @@ impl LinkSessionHandler {
     /// 使用数据库、board 存储与指标写入器构造处理器。
     pub fn new(db: DbPool, board: Arc<dyn BoardStateStore>, metrics: Arc<MetricWriter>) -> Self {
         let ingest = IngestPipeline::new(board.clone(), metrics, SNAPSHOT_TTL);
+        let pending_last_seen = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        // Coalesce last_seen/runtime updates from all nodes into one commit per
+        // second. Telemetry ingestion never waits for this display-only write.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let writer_db = db.clone();
+            let pending = pending_last_seen.clone();
+            handle.spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let updates = {
+                        let mut pending = pending.lock().await;
+                        if pending.is_empty() {
+                            continue;
+                        }
+                        std::mem::take(&mut *pending)
+                    };
+                    let rows: Vec<(String, u64, u64, u64)> = updates
+                        .into_iter()
+                        .map(|(uuid, (up, down, uptime))| (uuid, up, down, uptime))
+                        .collect();
+                    if let Err(error) = ClientRepository::new(&writer_db)
+                        .touch_last_seen_batch(&rows)
+                        .await
+                    {
+                        tracing::warn!(error = %error, "batched last_seen write failed");
+                    }
+                }
+            });
+        }
         Self {
             db,
             board,
@@ -47,6 +77,7 @@ impl LinkSessionHandler {
             geo_wake: None,
             // Avoid one UPDATE per 1s telemetry batch per node.
             last_seen_write: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_last_seen,
         }
     }
 
@@ -313,7 +344,6 @@ impl BoardSessionHandler for LinkSessionHandler {
             .ingest_telemetry(node_uuid, &batch)
             .await
             .map_err(state_err)?;
-        let clients = ClientRepository::new(&self.db);
         // last_seen is for display only; online state is driven by the board
         // presence. Throttle it so 1s telemetry does not produce 1 DB commit
         // per node per second.
@@ -330,16 +360,14 @@ impl BoardSessionHandler for LinkSessionHandler {
         };
         if should_write {
             if let Some(sample) = batch.samples.last() {
-                let _ = clients
-                    .touch_last_seen_with_runtime(
-                        node_uuid,
+                self.pending_last_seen.lock().await.insert(
+                    node_uuid.to_string(),
+                    (
                         sample.network.total_up,
                         sample.network.total_down,
                         sample.uptime,
-                    )
-                    .await;
-            } else {
-                let _ = clients.touch_last_seen(node_uuid).await;
+                    ),
+                );
             }
         }
         tracing::debug!(
@@ -404,9 +432,14 @@ impl LinkSessionHandler {
             // struct expects `{"results": [...]}`. Do not deserialize the
             // array itself, or every batch result is silently rejected.
             let params = parse_ping_batch_result(payload)?;
+            let mut records = Vec::with_capacity(params.results.len());
             for result in params.results {
-                self.insert_ping_result(node_uuid, result).await?;
+                records.push(self.ping_record(node_uuid, result));
             }
+            PingRepository::new(&self.db)
+                .insert_records(&records)
+                .await
+                .map_err(|e| e.to_string())?;
             return Ok(());
         }
         if method != METHOD_AGENT_PING_RESULT {
@@ -426,21 +459,30 @@ impl LinkSessionHandler {
         self.insert_ping_result(node_uuid, params).await
     }
 
+    fn ping_record(
+        &self,
+        node_uuid: &str,
+        params: AgentPingResultParams,
+    ) -> (String, i64, i32, i64) {
+        let observed_at_ms = chrono::DateTime::parse_from_rfc3339(&params.finished_at)
+            .map(|t| t.timestamp_millis())
+            .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis());
+        (
+            node_uuid.to_string(),
+            params.task_id as i64,
+            params.value,
+            observed_at_ms,
+        )
+    }
+
     async fn insert_ping_result(
         &self,
         node_uuid: &str,
         params: AgentPingResultParams,
     ) -> Result<(), String> {
-        let observed_at_ms = chrono::DateTime::parse_from_rfc3339(&params.finished_at)
-            .map(|t| t.timestamp_millis())
-            .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis());
+        let record = self.ping_record(node_uuid, params);
         PingRepository::new(&self.db)
-            .insert_record(
-                node_uuid,
-                params.task_id as i64,
-                params.value,
-                observed_at_ms,
-            )
+            .insert_records(&[record])
             .await
             .map_err(|e| e.to_string())?;
         Ok(())

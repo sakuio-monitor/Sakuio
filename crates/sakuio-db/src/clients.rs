@@ -420,6 +420,41 @@ pub struct ClientRepository<'a> {
     pool: &'a DbPool,
 }
 
+fn public_row_from_raw(row: PublicClientRowRaw) -> PublicClientRow {
+    PublicClientRow {
+        uuid: row.uuid,
+        name: row.name,
+        sort_order: row.sort_order,
+        online: row.online != 0,
+        disabled: row.disabled != 0,
+        ipv4: row.ipv4,
+        ipv6: row.ipv6,
+        region: row.region,
+        region6: row.region6,
+        agent_version: row.agent_version,
+        group_name: row.group_name,
+        private_remark: row.private_remark,
+        price: row.price,
+        billing_cycle: i32::try_from(row.billing_cycle).unwrap_or(0),
+        currency: row.currency,
+        expired_at: row.expired_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        basic_info_json: row.basic_info_json,
+        auto_renewal: row.auto_renewal != 0,
+        traffic_threshold: row.traffic_threshold,
+        traffic_stat_mode: row.traffic_stat_mode,
+        traffic_used_up: row.traffic_used_up,
+        traffic_used_down: row.traffic_used_down,
+        traffic_reset_mode: row.traffic_reset_mode,
+        last_net_total_up: row.last_net_total_up,
+        last_net_total_down: row.last_net_total_down,
+        last_uptime_secs: row.last_uptime_secs,
+        bandwidth: row.bandwidth,
+        bandwidth_unit: row.bandwidth_unit,
+    }
+}
+
 impl<'a> ClientRepository<'a> {
     /// Creates a repository bound to the given pool.
     /// 绑定到指定连接池的仓储实例。
@@ -502,41 +537,26 @@ impl<'a> ClientRepository<'a> {
         )
         .fetch_all(self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| PublicClientRow {
-                uuid: row.uuid,
-                name: row.name,
-                sort_order: row.sort_order,
-                online: row.online != 0,
-                disabled: row.disabled != 0,
-                ipv4: row.ipv4,
-                ipv6: row.ipv6,
-                region: row.region,
-                region6: row.region6,
-                agent_version: row.agent_version,
-                group_name: row.group_name,
-                private_remark: row.private_remark,
-                price: row.price,
-                billing_cycle: i32::try_from(row.billing_cycle).unwrap_or(0),
-                currency: row.currency,
-                expired_at: row.expired_at,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-                basic_info_json: row.basic_info_json,
-                auto_renewal: row.auto_renewal != 0,
-                traffic_threshold: row.traffic_threshold,
-                traffic_stat_mode: row.traffic_stat_mode,
-                traffic_used_up: row.traffic_used_up,
-                traffic_used_down: row.traffic_used_down,
-                traffic_reset_mode: row.traffic_reset_mode,
-                last_net_total_up: row.last_net_total_up,
-                last_net_total_down: row.last_net_total_down,
-                last_uptime_secs: row.last_uptime_secs,
-                bandwidth: row.bandwidth,
-                bandwidth_unit: row.bandwidth_unit,
-            })
-            .collect())
+        Ok(rows.into_iter().map(public_row_from_raw).collect())
+    }
+
+    /// Loads one public client without scanning every node.
+    pub async fn get_for_public_api(&self, uuid: &str) -> DbResult<Option<PublicClientRow>> {
+        let row: Option<PublicClientRowRaw> = sqlx::query_as(
+            "SELECT uuid, name, COALESCE(sort_order, 1e18) AS sort_order, online, disabled, ipv4, ipv6, region, region6,
+                    agent_version,
+                    group_name, private_remark, price, billing_cycle, currency,
+                    expired_at, created_at, updated_at, basic_info_json,
+                    auto_renewal, traffic_threshold, traffic_stat_mode,
+                    traffic_used_up, traffic_used_down, traffic_reset_mode,
+                    last_net_total_up, last_net_total_down, last_uptime_secs,
+                    bandwidth, bandwidth_unit
+             FROM clients WHERE uuid = ? LIMIT 1",
+        )
+        .bind(uuid)
+        .fetch_optional(self.pool)
+        .await?;
+        Ok(row.map(public_row_from_raw))
     }
 
     /// Lists all clients for dashboard / public API.
@@ -1202,6 +1222,32 @@ impl<'a> ClientRepository<'a> {
         .bind(uuid)
         .execute(self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Persists several last_seen/runtime updates in one transaction.
+    pub async fn touch_last_seen_batch(&self, updates: &[(String, u64, u64, u64)]) -> DbResult<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
+        for (uuid, net_total_up, net_total_down, uptime_secs) in updates {
+            sqlx::query(
+                "UPDATE clients SET last_seen_at = ?, updated_at = ?, \
+                 last_net_total_up = ?, last_net_total_down = ?, last_uptime_secs = ? \
+                 WHERE uuid = ?",
+            )
+            .bind(&now)
+            .bind(&now)
+            .bind(*net_total_up as i64)
+            .bind(*net_total_down as i64)
+            .bind(*uptime_secs as i64)
+            .bind(uuid)
+            .execute(&mut tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
