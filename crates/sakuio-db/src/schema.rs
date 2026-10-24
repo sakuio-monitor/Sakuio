@@ -244,10 +244,34 @@ pub static TABLES: &[TableDef] = &[
         )],
     },
     TableDef {
+        name: "metric_nodes",
+        cols: &[req("id", AutoId), req("uuid", Key)],
+        pk: &["id"],
+        fks: &[],
+        indexes: &[uniq("uq_metric_nodes_uuid", &["uuid"])],
+    },
+    TableDef {
+        name: "metric_keys",
+        cols: &[req("id", AutoId), req("metric_key", Key)],
+        pk: &["id"],
+        fks: &[],
+        indexes: &[uniq("uq_metric_keys_key", &["metric_key"])],
+    },
+    TableDef {
+        name: "metric_series",
+        cols: &[
+            req("id", AutoId),
+            req("node_id", BigInt),
+            req("metric_id", BigInt),
+        ],
+        pk: &["id"],
+        fks: &[],
+        indexes: &[uniq("uq_metric_series_pair", &["node_id", "metric_id"])],
+    },
+    TableDef {
         name: "metric_buckets",
         cols: &[
-            req("node_uuid", Key),
-            req("metric_key", Key),
+            req("series_id", BigInt),
             req("bucket_seconds", BigInt),
             req("bucket_start_ms", BigInt),
             req("avg_val", Double),
@@ -260,12 +284,7 @@ pub static TABLES: &[TableDef] = &[
             def("p95_val", Double, DR(0.0)),
             def("p99_val", Double, DR(0.0)),
         ],
-        pk: &[
-            "node_uuid",
-            "metric_key",
-            "bucket_seconds",
-            "bucket_start_ms",
-        ],
+        pk: &["series_id", "bucket_seconds", "bucket_start_ms"],
         fks: &[],
         indexes: &[
             idx(
@@ -274,16 +293,11 @@ pub static TABLES: &[TableDef] = &[
             ),
             idx(
                 "idx_metric_buckets_dashboard",
-                &[
-                    "bucket_seconds",
-                    "metric_key",
-                    "bucket_start_ms",
-                    "node_uuid",
-                ],
+                &["bucket_seconds", "series_id", "bucket_start_ms"],
             ),
             idx(
                 "idx_metric_buckets_node_window_time",
-                &["node_uuid", "bucket_seconds", "bucket_start_ms"],
+                &["series_id", "bucket_seconds", "bucket_start_ms"],
             ),
         ],
     },
@@ -884,16 +898,117 @@ async fn remove_id_column(
     Ok(())
 }
 
+/// Migrates string-keyed metric buckets into node/metric series dictionaries.
+pub async fn migrate_metric_dictionary(pool: &DbPool, prefix: &str) -> Result<(), sqlx::Error> {
+    let prefix = validate_prefix(prefix)?;
+    let kind = pool.kind();
+    let buckets = format!("{prefix}buckets");
+    if !table_exists(pool, kind, &buckets).await? {
+        return Ok(());
+    }
+    let columns = existing_columns(pool, kind, &buckets).await?;
+    if !columns.iter().any(|c| c.eq_ignore_ascii_case("node_uuid"))
+        || !columns.iter().any(|c| c.eq_ignore_ascii_case("metric_key"))
+    {
+        return Ok(());
+    }
+    for name in ["metric_nodes", "metric_keys", "metric_series"] {
+        let def = TABLES.iter().find(|t| t.name == name).unwrap();
+        let physical = format!("{prefix}{}", &name["metric_".len()..]);
+        ensure_table(pool, kind, def, &physical, &prefix).await?;
+    }
+    let nodes = format!("{prefix}nodes");
+    let keys = format!("{prefix}keys");
+    let series = format!("{prefix}series");
+    let old = format!("{buckets}__legacy_dict");
+    sqlx::query(&format!("DROP VIEW IF EXISTS {}buckets_view", prefix))
+        .execute(pool)
+        .await?;
+    sqlx::query(&format!("DROP TABLE IF EXISTS {old}"))
+        .execute(pool)
+        .await?;
+    let rename_old = match kind {
+        DbKind::MySql => format!("RENAME TABLE {buckets} TO {old}"),
+        _ => format!("ALTER TABLE {buckets} RENAME TO {old}"),
+    };
+    sqlx::query(&rename_old).execute(pool).await?;
+    let def = TABLES.iter().find(|t| t.name == "metric_buckets").unwrap();
+    let buckets_ddl = render(kind, &create_statement(kind, def, &buckets));
+    sqlx::query(&buckets_ddl).execute(pool).await?;
+
+    let insert = match kind {
+        DbKind::MySql => "INSERT IGNORE",
+        DbKind::Sqlite => "INSERT OR IGNORE",
+        DbKind::Postgres => "INSERT",
+    };
+    let suffix = if kind == DbKind::Postgres {
+        " ON CONFLICT DO NOTHING"
+    } else {
+        ""
+    };
+    for (target, source, column) in [
+        (&nodes, "node_uuid", "uuid"),
+        (&keys, "metric_key", "metric_key"),
+    ] {
+        let sql = format!(
+            "{insert} INTO {target} ({column}) SELECT DISTINCT {source} FROM {old}{suffix}"
+        );
+        sqlx::query(&sql).execute(pool).await?;
+    }
+    let series_sql = format!(
+        "{insert} INTO {series} (node_id, metric_id) SELECT DISTINCT n.id, k.id \
+         FROM {old} b JOIN {nodes} n ON n.uuid = b.node_uuid \
+         JOIN {keys} k ON k.metric_key = b.metric_key{suffix}"
+    );
+    sqlx::query(&series_sql).execute(pool).await?;
+    let copy = format!(
+        "INSERT INTO {buckets} (series_id, bucket_seconds, bucket_start_ms, avg_val, min_val, max_val, sample_count, sum_sq, variance, p50_val, p95_val, p99_val) \
+         SELECT s.id, b.bucket_seconds, b.bucket_start_ms, b.avg_val, b.min_val, b.max_val, b.sample_count, b.sum_sq, b.variance, b.p50_val, b.p95_val, b.p99_val \
+         FROM {old} b JOIN {series} s JOIN {nodes} n ON n.id = s.node_id AND n.uuid = b.node_uuid \
+         JOIN {keys} k ON k.id = s.metric_id AND k.metric_key = b.metric_key"
+    );
+    sqlx::query(&copy).execute(pool).await?;
+    sqlx::query(&format!("DROP TABLE {old}"))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Creates the joined read view consumed by metric queries and dashboards.
+pub async fn ensure_metric_view(pool: &DbPool, prefix: &str) -> Result<(), sqlx::Error> {
+    let prefix = validate_prefix(prefix)?;
+    let kind = pool.kind();
+    let buckets = format!("{prefix}buckets");
+    if !table_exists(pool, kind, &buckets).await? {
+        return Ok(());
+    }
+    let view = format!("{prefix}buckets_view");
+    sqlx::query(&format!("DROP VIEW IF EXISTS {view}"))
+        .execute(pool)
+        .await?;
+    let sql = format!(
+        "CREATE VIEW {view} AS SELECT b.series_id, n.uuid AS node_uuid, k.metric_key AS metric_key, \
+         b.bucket_seconds, b.bucket_start_ms, b.avg_val, b.min_val, b.max_val, b.sample_count, \
+         b.sum_sq, b.variance, b.p50_val, b.p95_val, b.p99_val \
+         FROM {buckets} b JOIN {prefix}series s ON s.id = b.series_id \
+         JOIN {prefix}nodes n ON n.id = s.node_id JOIN {prefix}keys k ON k.id = s.metric_id"
+    );
+    sqlx::query(&sql).execute(pool).await?;
+    Ok(())
+}
+
 /// Ensures every table / index / column exists, additively, on the given pool.
 /// `only` 为空时同步全部表；否则仅同步指定表（独立监控库只需桶/保留表）。
 /// 对给定连接池幂等确保全部表、索引与列存在（只增不改）。
 pub async fn ensure_schema(pool: &DbPool, kind: DbKind, only: &[&str]) -> Result<(), sqlx::Error> {
+    migrate_metric_dictionary(pool, "metric_").await?;
     for table in TABLES {
         if !only.is_empty() && !only.contains(&table.name) {
             continue;
         }
         ensure_table(pool, kind, table, table.name, "").await?;
     }
+    ensure_metric_view(pool, "metric_").await?;
     // The unique client/task/time index replaces the old non-unique one.
     if index_exists(
         pool,
@@ -920,6 +1035,7 @@ pub async fn ensure_schema(pool: &DbPool, kind: DbKind, only: &[&str]) -> Result
 pub async fn ensure_metric_schema(pool: &DbPool, prefix: &str) -> Result<(), sqlx::Error> {
     let prefix = validate_prefix(prefix)?;
     let kind = pool.kind();
+    migrate_metric_dictionary(pool, &prefix).await?;
     migrate_legacy_ids(pool).await?;
     for table in TABLES.iter().filter(|t| t.name.starts_with("metric_")) {
         let suffix = &table.name["metric_".len()..];
@@ -938,6 +1054,7 @@ pub async fn ensure_metric_schema(pool: &DbPool, prefix: &str) -> Result<(), sql
             drop_index(pool, kind, &buckets, legacy).await?;
         }
     }
+    ensure_metric_view(pool, &prefix).await?;
     crate::metric_storage::ensure_timescale(pool, &prefix).await?;
     Ok(())
 }

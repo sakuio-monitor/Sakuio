@@ -13,9 +13,31 @@ async fn legacy_surrogate_ids_are_rebuilt() {
     ] {
         sqlx::query(sql).execute(&pool).await.unwrap();
     }
+    sqlx::query(
+        "INSERT INTO metric_buckets (node_uuid, metric_key, bucket_seconds, bucket_start_ms, avg_val, min_val, max_val, sample_count, sum_sq, variance, p50_val, p95_val, p99_val) VALUES ('node-1', 'cpu.usage', 60, 1000, 5.0, 4.0, 6.0, 2, 50.0, 1.0, 5.0, 6.0, 6.0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO ping_records (client_uuid, task_id, observed_at_ms, value_ms) VALUES ('node-1', 1, 1000, 7)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     pool.close().await;
 
     let app = AppDatabase::connect(&dsn, true).await.unwrap();
+    let view_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metric_buckets_view")
+        .fetch_one(app.pool())
+        .await
+        .unwrap();
+    assert_eq!(view_rows, 1);
+    let nodes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metric_nodes")
+        .fetch_one(app.pool())
+        .await
+        .unwrap();
+    assert_eq!(nodes, 1);
     for table in ["ping_records", "metric_buckets"] {
         let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
             .fetch_all(app.pool())

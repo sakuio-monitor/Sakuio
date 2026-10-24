@@ -8,8 +8,8 @@ async fn metric_schema_does_not_keep_duplicate_indexes() {
     ensure_metric_schema(app.pool(), "metric_").await.unwrap();
 
     sqlx::query(
-        "CREATE INDEX metric_idx_metric_buckets_dashboard \
-         ON metric_buckets (bucket_seconds, metric_key, bucket_start_ms, node_uuid)",
+        "CREATE INDEX idx_metric_buckets_node_metric \
+         ON metric_buckets (series_id, bucket_seconds)",
     )
     .execute(app.pool().inner())
     .await
@@ -18,7 +18,7 @@ async fn metric_schema_does_not_keep_duplicate_indexes() {
     ensure_metric_schema(app.pool(), "metric_").await.unwrap();
     let legacy: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
-         AND name='metric_idx_metric_buckets_dashboard'",
+         AND name='idx_metric_buckets_node_metric'",
     )
     .fetch_one(app.pool().inner())
     .await
