@@ -838,21 +838,21 @@ async fn remove_id_column(
     let column_list = columns.join(", ");
     match kind {
         DbKind::Sqlite => {
-            let temp = format!("{physical}__id_migration");
-            sqlx::query(&format!("DROP TABLE IF EXISTS {temp}"))
+            let old = format!("{physical}__id_old");
+            sqlx::query(&format!("DROP TABLE IF EXISTS {old}"))
                 .execute(pool)
                 .await?;
-            let ddl = render(kind, &create_statement(kind, table, &temp));
+            sqlx::query(&format!("ALTER TABLE {physical} RENAME TO {old}"))
+                .execute(pool)
+                .await?;
+            let ddl = render(kind, &create_statement(kind, table, physical));
             sqlx::query(&ddl).execute(pool).await?;
             sqlx::query(&format!(
-                "INSERT INTO {temp} ({column_list}) SELECT {column_list} FROM {physical}"
+                "INSERT INTO {physical} ({column_list}) SELECT {column_list} FROM {old}"
             ))
             .execute(pool)
             .await?;
-            sqlx::query(&format!("DROP TABLE {physical}"))
-                .execute(pool)
-                .await?;
-            sqlx::query(&format!("ALTER TABLE {temp} RENAME TO {physical}"))
+            sqlx::query(&format!("DROP TABLE {old}"))
                 .execute(pool)
                 .await?;
         }
