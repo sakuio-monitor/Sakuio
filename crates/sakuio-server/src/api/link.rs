@@ -33,11 +33,10 @@ pub async fn agent_link(
         .unwrap_or("")
         .to_string();
     if token.is_empty() {
-        crate::audit::record_event(
-            &state, "agent", "", "AGENT_AUTH_FAILED", "", "missing bearer token",
-            &audit_ip, &user_agent, 401, "GET", "/api/agent/link",
-        )
-        .await;
+        crate::audit::record_agent_event(
+            &state, "", "AGENT_AUTH_FAILED", "", "missing bearer token",
+            &audit_ip, &user_agent, 401, "/api/agent/link",
+        );
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "message": "token required" })),
@@ -58,11 +57,10 @@ pub async fn agent_link(
                     resolved = Ok(Some(uuid));
                 }
                 Err(e) => {
-                    crate::audit::record_event(
-                        &state, "agent", "", "AGENT_AUTODISCOVERY_REJECTED", "", &e,
-                        &audit_ip, &user_agent, 500, "GET", "/api/agent/link",
-                    )
-                    .await;
+                    crate::audit::record_agent_event(
+                        &state, "", "AGENT_AUTODISCOVERY_REJECTED", "", &e,
+                        &audit_ip, &user_agent, 500, "/api/agent/link",
+                    );
                     tracing::warn!(ip = %ip, error = %e, "auto discovery registration failed");
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -77,32 +75,29 @@ pub async fn agent_link(
     match resolved {
         Ok(Some(uuid)) => {
             if repo.is_disabled(&uuid).await.unwrap_or(true) {
-                crate::audit::record_event(
-                    &state, "agent", &uuid, "AGENT_AUTH_FAILED", &uuid, "client disabled",
-                    &audit_ip, &user_agent, 403, "GET", "/api/agent/link",
-                )
-                .await;
+                crate::audit::record_agent_event(
+                    &state, &uuid, "AGENT_AUTH_FAILED", &uuid, "client disabled",
+                    &audit_ip, &user_agent, 403, "/api/agent/link",
+                );
                 return (
                     StatusCode::FORBIDDEN,
                     Json(serde_json::json!({ "message": "client disabled" })),
                 )
                     .into_response();
             }
-            crate::audit::record_event(
-                &state, "agent", &uuid, "AGENT_LINK_OPEN", &uuid, "websocket accepted",
-                &audit_ip, &user_agent, 101, "GET", "/api/agent/link",
-            )
-            .await;
+            crate::audit::record_agent_event(
+                &state, &uuid, "AGENT_LINK_OPEN", &uuid, "websocket accepted",
+                &audit_ip, &user_agent, 101, "/api/agent/link",
+            );
             ws_upgrade(ws, State(state.link), resolved_token)
                 .await
                 .into_response()
         }
         Ok(None) => {
-            crate::audit::record_event(
-                &state, "agent", "", "AGENT_AUTH_FAILED", "", "unknown node token",
-                &audit_ip, &user_agent, 401, "GET", "/api/agent/link",
-            )
-            .await;
+            crate::audit::record_agent_event(
+                &state, "", "AGENT_AUTH_FAILED", "", "unknown node token",
+                &audit_ip, &user_agent, 401, "/api/agent/link",
+            );
             (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({ "message": "unknown token" })),
@@ -131,11 +126,10 @@ async fn auto_register(state: &AppState, ip: &str) -> Result<(String, String), S
         })
         .await
         .map_err(|e| e.to_string())?;
-    crate::audit::record_event(
-        state, "agent", &uuid, "AGENT_AUTODISCOVERY_REGISTER", &uuid,
-        "auto discovery registration succeeded", ip, "", 201, "GET", "/api/agent/link",
-    )
-    .await;
+    crate::audit::record_agent_event(
+        state, &uuid, "AGENT_AUTODISCOVERY_REGISTER", &uuid,
+        "auto discovery registration succeeded", ip, "", 201, "/api/agent/link",
+    );
     tracing::info!(ip = %ip, node_uuid = %uuid, "auto discovery registered new node");
     Ok((uuid, token))
 }

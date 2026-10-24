@@ -38,6 +38,65 @@ pub async fn record_auth_event(
     .await;
 }
 
+/// Queues an agent-facing event without blocking the WebSocket handshake.
+/// Repeated failures from one source are collapsed to one record per minute.
+pub fn record_agent_event(
+    state: &AppState,
+    actor_id: &str,
+    action: &str,
+    target: &str,
+    detail: &str,
+    ip: &str,
+    user_agent: &str,
+    status: i64,
+    path: &str,
+) -> bool {
+    let key = if action == "AGENT_LINK_OPEN" {
+        format!("open:{actor_id}")
+    } else {
+        format!("{action}:{ip}")
+    };
+    if !agent_event_allowed(&key, std::time::Duration::from_secs(60)) {
+        return false;
+    }
+    state.audit.record(NewAuditLog {
+        created_at: now(),
+        actor: "agent".to_string(),
+        actor_id: actor_id.to_string(),
+        action: action.to_string(),
+        target: target.to_string(),
+        detail: detail.to_string(),
+        ip: ip.to_string(),
+        user_agent: user_agent.to_string(),
+        status,
+        method: "GET".to_string(),
+        path: path.to_string(),
+        geo_country_code: String::new(),
+        geo_location: String::new(),
+    });
+    true
+}
+
+fn agent_event_allowed(key: &str, interval: std::time::Duration) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let table = LAST.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut table) = table.lock() else {
+        return true;
+    };
+    let now = Instant::now();
+    if table.len() > 4096 {
+        table.retain(|_, at| now.duration_since(*at) < std::time::Duration::from_secs(300));
+    }
+    if table.get(key).is_some_and(|at| now.duration_since(*at) < interval) {
+        return false;
+    }
+    table.insert(key.to_string(), now);
+    true
+}
+
 /// Writes a non-auth operational event (agent, background job, remote action).
 pub async fn record_event(
     state: &AppState,
