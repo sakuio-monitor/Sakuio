@@ -105,6 +105,7 @@ jobs:
         shell: bash
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
+          SAKUIO_BUILD_COMMIT: ${{ github.sha }}
         run: cargo zigbuild --release --target ${{ matrix.target }} --features embedded-admin -p sakuio-server
 
       - name: Verify static binary

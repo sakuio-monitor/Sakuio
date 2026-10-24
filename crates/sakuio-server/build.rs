@@ -8,8 +8,9 @@ fn main() {
         .unwrap_or(0);
     // GitHub Actions exposes GITHUB_SHA even when git metadata is unavailable
     // inside the build environment. Prefer it over a local git invocation.
-    let commit = std::env::var("GITHUB_SHA")
+    let commit = std::env::var("SAKUIO_BUILD_COMMIT")
         .ok()
+        .or_else(|| std::env::var("GITHUB_SHA").ok())
         .map(|sha| sha.chars().take(7).collect::<String>())
         .filter(|sha| !sha.is_empty())
         .or_else(|| {
