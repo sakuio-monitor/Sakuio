@@ -4,7 +4,7 @@ use super::ping::ping_stats_for_node;
 use chrono::{TimeZone, Utc};
 use sakuio_board::BoardStateStore;
 use sakuio_db::{ClientRepository, PublicClientRow};
-use sakuio_protocol::BasicInfoParams;
+use sakuio_protocol::{BasicInfoParams, AGENT_VERSION_RANGE_MAX, AGENT_VERSION_RANGE_MIN};
 use serde_json::{json, Value};
 
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -43,6 +43,9 @@ pub fn version_info() -> Value {
     json!({
         "version": SERVER_VERSION,
         "hash": "sakuio",
+        "build_time": option_env!("SAKUIO_BUILD_EPOCH").unwrap_or("0"),
+        "agent_min": AGENT_VERSION_RANGE_MIN,
+        "agent_max": AGENT_VERSION_RANGE_MAX,
     })
 }
 
@@ -170,7 +173,7 @@ pub fn client_record(row: &PublicClientRow, guest_view: bool, show_partial_ip: b
         "auto_renewal": row.auto_renewal,
         "currency": row.currency,
         "expired_at": row.expired_at.clone().unwrap_or_default(),
-        "group": row.group_name,
+        "group": row.group_name.replace(',', ";"),
         "tags": row.tags,
         "hidden": false,
         "traffic_limit": row.traffic_threshold,
@@ -198,15 +201,17 @@ pub async fn common_get_nodes_map(
     filter_uuid: Option<&str>,
 ) -> Result<Value, (i32, &'static str)> {
     let show_partial_ip = crate::site_settings::load(state).await.show_partial_ip;
+    if let Some(uuid) = filter_uuid {
+        let row = sakuio_db::ClientRepository::new(&state.db)
+            .get_for_public_api(uuid)
+            .await
+            .map_err(|_| (-32603, "Internal error"))?
+            .ok_or((-32602, "Node not found"))?;
+        return Ok(client_record(&row, true, show_partial_ip));
+    }
     let rows = load_public_clients(state)
         .await
         .map_err(|c| (c, "Internal error"))?;
-    if let Some(uuid) = filter_uuid {
-        let Some(row) = rows.into_iter().find(|r| r.uuid == uuid) else {
-            return Err((-32602, "Node not found"));
-        };
-        return Ok(client_record(&row, true, show_partial_ip));
-    }
     let mut map = serde_json::Map::new();
     for row in rows {
         if row.disabled {
@@ -232,6 +237,28 @@ pub async fn common_get_nodes_latest_status(
     state: &AppState,
     filter_uuid: Option<&str>,
 ) -> Result<Value, (i32, &'static str)> {
+    if let Some(uuid) = filter_uuid {
+        let row = sakuio_db::ClientRepository::new(&state.db)
+            .get_for_public_api(uuid)
+            .await
+            .map_err(|_| (-32603, "Internal error"))?
+            .filter(|row| !row.disabled)
+            .ok_or((-32602, "Node not found"))?;
+        let snap = state
+            .board
+            .get_latest_snapshot(&row.uuid)
+            .await
+            .ok()
+            .flatten();
+        let ping = ping_stats_for_node(&state.db, &row.uuid)
+            .await
+            .unwrap_or_else(|_| json!({}));
+        let mut status = node_status_json(&row, snap.as_ref());
+        if let Some(obj) = status.as_object_mut() {
+            obj.insert("ping".into(), ping);
+        }
+        return Ok(status);
+    }
     let rows = load_public_clients(state)
         .await
         .map_err(|c| (c, "Internal error"))?;
@@ -239,11 +266,6 @@ pub async fn common_get_nodes_latest_status(
     for row in rows {
         if row.disabled {
             continue;
-        }
-        if let Some(u) = filter_uuid {
-            if row.uuid != u {
-                continue;
-            }
         }
         let snap = state
             .board
@@ -258,13 +280,7 @@ pub async fn common_get_nodes_latest_status(
         if let Some(obj) = status.as_object_mut() {
             obj.insert("ping".into(), ping);
         }
-        if filter_uuid.is_some() {
-            return Ok(status);
-        }
         map.insert(row.uuid.clone(), status);
-    }
-    if filter_uuid.is_some() && map.is_empty() {
-        return Err((-32602, "Node not found"));
     }
     Ok(Value::Object(map))
 }
