@@ -26,7 +26,7 @@ const METRICS: &str = "'cpu.usage','memory.used','disk.used','net.in.rate','net.
 pub struct DashboardService {
     pool: DbPool,
     metric: Arc<MetricRuntime>,
-    cache: Arc<tokio::sync::RwLock<HashMap<String, (std::time::Instant, Value)>>>,
+    cache: Arc<tokio::sync::RwLock<HashMap<String, (i64, Value)>>>,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -176,11 +176,6 @@ impl DashboardService {
     }
 
     async fn bootstrap_code(&self, range: &str, display_range: &str) -> Result<Value, String> {
-        if let Some((at, value)) = self.cache.read().await.get(range) {
-            if at.elapsed() < Duration::from_secs(5) {
-                return Ok(value.clone());
-            }
-        }
         let meta: Option<(i64, i64, i64, String)> = sqlx::query_as(
             "SELECT revision, generated_at, coverage_start, status FROM dashboard_meta WHERE range_code = ?",
         )
@@ -195,11 +190,9 @@ impl DashboardService {
                 let _ = service.refresh(&code).await;
             });
         } else if display_range != "custom"
-            && meta
-                .as_ref()
-                .is_some_and(|(_, generated_at, _, _)| {
-                    now_ms().saturating_sub(*generated_at) > 300_000
-                })
+            && meta.as_ref().is_some_and(|(_, generated_at, _, _)| {
+                now_ms().saturating_sub(*generated_at) > 300_000
+            })
         {
             // A range switch must not show a snapshot from an hour ago (the
             // long-range refresher runs hourly). Refresh before reading it.
@@ -212,6 +205,14 @@ impl DashboardService {
         }
         let (revision, generated_at, _coverage_start, status) =
             meta.unwrap_or((0, 0, 0, "warming".to_string()));
+        // Revision is incremented by every snapshot refresh. Returning the
+        // cached payload only when it still matches avoids both the old fixed
+        // 5-second staleness window and unnecessary fleet/node queries.
+        if let Some((cached_revision, value)) = self.cache.read().await.get(range) {
+            if *cached_revision == revision {
+                return Ok(value.clone());
+            }
+        }
         let fleet: Vec<(i64, f64, f64, f64, f64, f64, f64, f64, i64, i64)> = sqlx::query_as(
             "SELECT bucket_start_ms, up_rate, down_rate, up_cum, down_cum, cpu_avg, mem_used, mem_total, online_nodes, sample_count FROM dashboard_fleet_points WHERE range_code = ? ORDER BY bucket_start_ms",
         )
@@ -391,10 +392,10 @@ impl DashboardService {
                 "ping_quality": ping
             }
         });
-        self.cache.write().await.insert(
-            range.to_string(),
-            (std::time::Instant::now(), payload.clone()),
-        );
+        self.cache
+            .write()
+            .await
+            .insert(range.to_string(), (revision, payload.clone()));
         Ok(payload)
     }
 
