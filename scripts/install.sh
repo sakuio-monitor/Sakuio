@@ -431,6 +431,49 @@ latest_version() {
   return 1
 }
 
+update_default_theme() {
+  local base="\$1" version="\$2"
+  local url="\${base}/frontend.zip"
+  local dir="\${INSTALL_DIR}/data/theme/SakuioTheme"
+  local tmp newdir
+  tmp="\$(mktemp)"
+  newdir="\$(mktemp -d)"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 3 -o "\$tmp" "\$url" 2>/dev/null || { rm -rf "\$tmp" "\$newdir"; echo "warning: 默认主题下载失败，保留现有主题" >&2; return 0; }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "\$tmp" "\$url" 2>/dev/null || { rm -rf "\$tmp" "\$newdir"; echo "warning: 默认主题下载失败，保留现有主题" >&2; return 0; }
+  else
+    rm -rf "\$tmp" "\$newdir"
+    echo "warning: 缺少 curl/wget，跳过默认主题更新" >&2
+    return 0
+  fi
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q -o "\$tmp" -d "\$newdir" || { rm -rf "\$tmp" "\$newdir"; echo "warning: 默认主题解压失败，保留现有主题" >&2; return 0; }
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -m zipfile -e "\$tmp" "\$newdir" || { rm -rf "\$tmp" "\$newdir"; echo "warning: 默认主题解压失败，保留现有主题" >&2; return 0; }
+  else
+    rm -rf "\$tmp" "\$newdir"
+    echo "warning: 缺少 unzip/python3，跳过默认主题更新" >&2
+    return 0
+  fi
+  if [[ ! -f "\$newdir/sakuio-theme.json" && ! -f "\$newdir/komari-theme.json" ]]; then
+    rm -rf "\$tmp" "\$newdir"
+    echo "warning: 默认主题包缺少清单，保留现有主题" >&2
+    return 0
+  fi
+  mkdir -p "\${dir%/*}"
+  rm -rf "\${dir}.backup"
+  [[ -d "\$dir" ]] && mv "\$dir" "\${dir}.backup"
+  if mv "\$newdir" "\$dir"; then
+    rm -rf "\${dir}.backup" "\$tmp"
+    echo "已更新默认主题到 v\${version}"
+  else
+    [[ -d "\${dir}.backup" ]] && mv "\${dir}.backup" "\$dir"
+    rm -rf "\$tmp" "\$newdir"
+    echo "warning: 默认主题替换失败，已恢复旧主题" >&2
+  fi
+}
+
 do_update() {
   require_root
   local proxy="\${GITHUB_PROXY:-}"
@@ -470,6 +513,7 @@ do_update() {
   cp -p "\$BIN" "\$BIN.bak" 2>/dev/null || true
   if install -m 755 "\$tmp" "\$BIN.new" && mv "\$BIN.new" "\$BIN"; then
     rm -f "\$tmp"
+    update_default_theme "\$base" "\$version"
     svc_start || true
     echo "已更新到 v\${version}"
   else
