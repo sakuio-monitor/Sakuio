@@ -148,5 +148,5 @@ pub async fn clients_sse(
             state,
         ))
     });
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)).text("keep-alive"))
 }

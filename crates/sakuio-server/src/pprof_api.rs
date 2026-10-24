@@ -535,7 +535,7 @@ async fn database_table_sizes(
             "SELECT table_name AS name, (data_length + index_length) AS size FROM information_schema.tables WHERE table_schema = DATABASE()"
         }
         sakuio_db::DbKind::Postgres => {
-            "SELECT relname AS name, pg_total_relation_size(relid) AS size FROM pg_catalog.pg_statio_user_tables"
+            "SELECT relname::text AS name, pg_total_relation_size(relid) AS size FROM pg_catalog.pg_statio_user_tables"
         }
     };
     let Ok(rows) = sqlx::query(sql).fetch_all(&state.db).await else {
