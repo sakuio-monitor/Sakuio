@@ -48,10 +48,7 @@ impl Registry {
         items
     }
 
-    pub async fn list_items(
-        &self,
-        enabled: impl Fn(&str) -> bool,
-    ) -> Vec<ChannelListItem> {
+    pub async fn list_items(&self, enabled: impl Fn(&str) -> bool) -> Vec<ChannelListItem> {
         self.list_meta()
             .await
             .into_iter()

@@ -58,11 +58,20 @@ async fn call(config: &Value, action: &str, payload: Value) -> Result<Value, Str
     if !response.status().is_success() {
         return Err(common::error_message(response).await);
     }
-    let value: Value = response.json().await.map_err(|error| format!("解析腾讯云响应失败：{error}"))?;
-    if let Some(error) = value.get("Response").and_then(|response| response.get("Error")) {
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("解析腾讯云响应失败：{error}"))?;
+    if let Some(error) = value
+        .get("Response")
+        .and_then(|response| response.get("Error"))
+    {
         return Err(format!(
             "腾讯云 DNSPod 错误：{}",
-            error.get("Message").and_then(Value::as_str).unwrap_or("未知错误")
+            error
+                .get("Message")
+                .and_then(Value::as_str)
+                .unwrap_or("未知错误")
         ));
     }
     Ok(value)
@@ -70,14 +79,34 @@ async fn call(config: &Value, action: &str, payload: Value) -> Result<Value, Str
 
 #[async_trait]
 impl DdnsDriver for TencentDriver {
-    fn id(&self) -> &'static str { "tencentcloud" }
-    fn name(&self) -> &'static str { "腾讯云" }
-    fn description(&self) -> &'static str { "腾讯云 SecretId / SecretKey，自动维护 A/AAAA 记录" }
+    fn id(&self) -> &'static str {
+        "tencentcloud"
+    }
+    fn name(&self) -> &'static str {
+        "腾讯云"
+    }
+    fn description(&self) -> &'static str {
+        "腾讯云 SecretId / SecretKey，自动维护 A/AAAA 记录"
+    }
 
     fn fields(&self) -> Vec<DriverField> {
         vec![
-            DriverField { key: "secret_id", label: "SecretId", kind: "text", required: true, placeholder: "腾讯云 SecretId", options: None },
-            DriverField { key: "secret_key", label: "SecretKey", kind: "password", required: true, placeholder: "腾讯云 SecretKey", options: None },
+            DriverField {
+                key: "secret_id",
+                label: "SecretId",
+                kind: "text",
+                required: true,
+                placeholder: "腾讯云 SecretId",
+                options: None,
+            },
+            DriverField {
+                key: "secret_key",
+                label: "SecretKey",
+                kind: "password",
+                required: true,
+                placeholder: "腾讯云 SecretKey",
+                options: None,
+            },
         ]
     }
 
@@ -89,43 +118,73 @@ impl DdnsDriver for TencentDriver {
 
     async fn update(&self, config: &Value, request: &DdnsUpdate) -> Result<DdnsResult, String> {
         let zone = request.zone_name.trim().trim_end_matches('.');
-        let name = if request.record_name.trim().is_empty() { "@" } else { request.record_name.trim() };
+        let name = if request.record_name.trim().is_empty() {
+            "@"
+        } else {
+            request.record_name.trim()
+        };
         let record_type = request.record_type.to_ascii_uppercase();
         let mut id = request.record_id.clone().filter(|value| !value.is_empty());
         if id.is_none() {
-            let value = call(config, "DescribeRecordList", json!({
-                "Domain": zone, "Subdomain": name, "RecordType": record_type, "Limit": 100
-            })).await?;
+            let value = call(
+                config,
+                "DescribeRecordList",
+                json!({
+                    "Domain": zone, "Subdomain": name, "RecordType": record_type, "Limit": 100
+                }),
+            )
+            .await?;
             id = value
                 .get("Response")
                 .and_then(|response| response.get("RecordList"))
                 .and_then(Value::as_array)
-                .and_then(|items| items.iter().find(|item| {
-                    item.get("Name").and_then(Value::as_str) == Some(name)
-                        && item.get("Type").and_then(Value::as_str) == Some(record_type.as_str())
-                }))
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("Name").and_then(Value::as_str) == Some(name)
+                            && item.get("Type").and_then(Value::as_str)
+                                == Some(record_type.as_str())
+                    })
+                })
                 .and_then(|item| item.get("RecordId"))
                 .map(|id| id.to_string());
         }
         if let Some(id) = id {
-            let record_id: i64 = id.parse().map_err(|_| "腾讯云记录 ID 格式错误".to_string())?;
-            call(config, "ModifyRecord", json!({
-                "Domain": zone, "RecordId": record_id, "SubDomain": name,
-                "RecordType": record_type, "RecordLine": "默认",
-                "Value": request.content, "TTL": request.ttl.max(60)
-            })).await?;
-            Ok(DdnsResult { zone_id: zone.into(), record_id: record_id.to_string() })
+            let record_id: i64 = id
+                .parse()
+                .map_err(|_| "腾讯云记录 ID 格式错误".to_string())?;
+            call(
+                config,
+                "ModifyRecord",
+                json!({
+                    "Domain": zone, "RecordId": record_id, "SubDomain": name,
+                    "RecordType": record_type, "RecordLine": "默认",
+                    "Value": request.content, "TTL": request.ttl.max(60)
+                }),
+            )
+            .await?;
+            Ok(DdnsResult {
+                zone_id: zone.into(),
+                record_id: record_id.to_string(),
+            })
         } else {
-            let value = call(config, "CreateRecord", json!({
-                "Domain": zone, "SubDomain": name, "RecordType": record_type,
-                "RecordLine": "默认", "Value": request.content, "TTL": request.ttl.max(60)
-            })).await?;
+            let value = call(
+                config,
+                "CreateRecord",
+                json!({
+                    "Domain": zone, "SubDomain": name, "RecordType": record_type,
+                    "RecordLine": "默认", "Value": request.content, "TTL": request.ttl.max(60)
+                }),
+            )
+            .await?;
             let id = value
                 .get("Response")
                 .and_then(|response| response.get("RecordId"))
                 .map(|id| id.to_string())
                 .unwrap_or_default();
-            Ok(DdnsResult { zone_id: zone.into(), record_id: id })
+            Ok(DdnsResult {
+                zone_id: zone.into(),
+                record_id: id,
+            })
         }
     }
 }

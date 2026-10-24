@@ -1,7 +1,9 @@
 //! Cloudflare authorization and DNS record driver.
 //! Cloudflare 授权与 DNS 记录驱动。
 
-use super::super::{DdnsDriver, DdnsResult, DdnsUpdate, DriverField, DriverOption, DriverRegistration};
+use super::super::{
+    DdnsDriver, DdnsResult, DdnsUpdate, DriverField, DriverOption, DriverRegistration,
+};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;

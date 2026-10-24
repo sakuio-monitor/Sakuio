@@ -121,7 +121,11 @@ async fn query_buckets(
                 .list_buckets_for_metric(uuid, key, bucket_seconds, since_ms, until_ms, limit)
                 .await
         }
-        None => store.list_buckets(uuid, bucket_seconds, since_ms, until_ms, limit).await,
+        None => {
+            store
+                .list_buckets(uuid, bucket_seconds, since_ms, until_ms, limit)
+                .await
+        }
     }
     .map_err(|_| (-32603, "Internal error"))
 }
@@ -171,7 +175,16 @@ pub async fn public_get_records_by_uuid(
     let fetch_limit = (budget * 4).clamp(100, 50_000);
 
     let store = state.metric.current_store().await;
-    let mut rows = query_buckets(&store, uuid, metric_key, bucket_seconds, since_ms, until_ms, fetch_limit).await?;
+    let mut rows = query_buckets(
+        &store,
+        uuid,
+        metric_key,
+        bucket_seconds,
+        since_ms,
+        until_ms,
+        fetch_limit,
+    )
+    .await?;
     // A completed 1h bucket only exists after a full hour of samples. For a
     // long range, fall back to the finest available window instead of
     // returning an empty chart while 4h data exists.
@@ -180,7 +193,16 @@ pub async fn public_get_records_by_uuid(
             if fallback >= bucket_seconds {
                 continue;
             }
-            let candidate = query_buckets(&store, uuid, metric_key, fallback, since_ms, until_ms, fetch_limit).await?;
+            let candidate = query_buckets(
+                &store,
+                uuid,
+                metric_key,
+                fallback,
+                since_ms,
+                until_ms,
+                fetch_limit,
+            )
+            .await?;
             if !candidate.is_empty() {
                 bucket_seconds = fallback;
                 rows = candidate;
@@ -295,7 +317,14 @@ pub async fn common_get_records(
     };
     if metric_key.is_none() && node_list.len() > 1 {
         let rows_by_node = store
-            .list_buckets_multi(&node_list, None, bucket_seconds, since_ms, until_ms, fetch_limit)
+            .list_buckets_multi(
+                &node_list,
+                None,
+                bucket_seconds,
+                since_ms,
+                until_ms,
+                fetch_limit,
+            )
             .await
             .map_err(|_| (-32603, "Internal error"))?;
         for (client, rows) in rows_by_node {
@@ -308,7 +337,14 @@ pub async fn common_get_records(
             let node_rows = match metric_key {
                 Some(key) => {
                     store
-                        .list_buckets_for_metric(client, key, bucket_seconds, since_ms, until_ms, per_node_limit)
+                        .list_buckets_for_metric(
+                            client,
+                            key,
+                            bucket_seconds,
+                            since_ms,
+                            until_ms,
+                            per_node_limit,
+                        )
                         .await
                 }
                 None => {

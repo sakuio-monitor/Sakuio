@@ -2,7 +2,7 @@
 //! 可执行文件同目录下的持久化服务配置。
 
 use anyhow::{Context, Result};
-use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -114,7 +114,10 @@ fn is_zero_u32(value: &u32) -> bool {
 impl DatabaseSettings {
     pub fn is_configured(&self) -> bool {
         let driver = self.driver.trim().to_ascii_lowercase();
-        matches!(driver.as_str(), "sqlite" | "sqlite3" | "postgres" | "postgresql" | "mysql" | "mariadb")
+        matches!(
+            driver.as_str(),
+            "sqlite" | "sqlite3" | "postgres" | "postgresql" | "mysql" | "mariadb"
+        )
     }
 
     pub fn dsn(&self) -> String {
@@ -130,12 +133,8 @@ impl DatabaseSettings {
                     format!("sqlite://{}?mode=rwc", path.trim_start_matches("./"))
                 }
             }
-            "postgres" | "postgresql" => {
-                self.network_dsn("postgres", 5432)
-            }
-            "mysql" | "mariadb" => {
-                self.network_dsn("mysql", 3306)
-            }
+            "postgres" | "postgresql" => self.network_dsn("postgres", 5432),
+            "mysql" | "mariadb" => self.network_dsn("mysql", 3306),
             _ => String::new(),
         }
     }
@@ -143,12 +142,24 @@ impl DatabaseSettings {
     fn network_dsn(&self, scheme: &str, default_port: u16) -> String {
         let user = utf8_percent_encode(self.user.trim(), NON_ALPHANUMERIC).to_string();
         let password = utf8_percent_encode(&self.password, NON_ALPHANUMERIC).to_string();
-        let host = if self.host.trim().is_empty() { "127.0.0.1" } else { self.host.trim() };
-        let port = if self.port == 0 { default_port } else { self.port };
+        let host = if self.host.trim().is_empty() {
+            "127.0.0.1"
+        } else {
+            self.host.trim()
+        };
+        let port = if self.port == 0 {
+            default_port
+        } else {
+            self.port
+        };
         let database = self.database.trim();
         let mut dsn = format!("{scheme}://{user}:{password}@{host}:{port}/{database}");
         if !self.ssl_mode.trim().is_empty() {
-            let key = if scheme == "postgres" { "sslmode" } else { "ssl-mode" };
+            let key = if scheme == "postgres" {
+                "sslmode"
+            } else {
+                "ssl-mode"
+            };
             dsn.push('?');
             dsn.push_str(key);
             dsn.push('=');
@@ -183,9 +194,13 @@ impl DatabaseSettings {
         }
         if let Ok(url) = Url::parse(dsn) {
             result.host = url.host_str().unwrap_or("127.0.0.1").to_string();
-            result.port = url.port().unwrap_or_else(|| if driver == "mysql" { 3306 } else { 5432 });
+            result.port = url
+                .port()
+                .unwrap_or_else(|| if driver == "mysql" { 3306 } else { 5432 });
             result.database = url.path().trim_start_matches('/').to_string();
-            result.user = percent_decode_str(url.username()).decode_utf8_lossy().to_string();
+            result.user = percent_decode_str(url.username())
+                .decode_utf8_lossy()
+                .to_string();
             result.password = url
                 .password()
                 .map(|value| percent_decode_str(value).decode_utf8_lossy().to_string())
@@ -230,10 +245,10 @@ impl ServerConfig {
     pub fn load_or_create() -> Result<Self> {
         let path = Self::path()?;
         if path.exists() {
-            let raw = fs::read_to_string(&path)
-                .with_context(|| format!("read {}", path.display()))?;
-            let config: Self = serde_yaml::from_str(&raw)
-                .with_context(|| format!("parse {}", path.display()))?;
+            let raw =
+                fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+            let config: Self =
+                serde_yaml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
             return Ok(config);
         }
         let config = Self::default();
@@ -247,8 +262,7 @@ impl ServerConfig {
 
     fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
         let raw = serde_yaml::to_string(self).context("serialize config.yaml")?;
         let tmp = path.with_extension(format!("yaml.tmp.{}", std::process::id()));

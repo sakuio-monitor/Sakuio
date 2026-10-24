@@ -218,7 +218,10 @@ mod client_ip_tests {
     fn reads_cloudflare_and_forwarded_headers() {
         let mut headers = HeaderMap::new();
         headers.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
-        headers.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.7, 10.0.0.1"));
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.7, 10.0.0.1"),
+        );
         assert_eq!(client_ip(&headers, proxy_addr()), "203.0.113.9");
     }
 
@@ -235,7 +238,10 @@ mod client_ip_tests {
     fn ignores_headers_from_untrusted_public_hop() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.9"));
-        let public = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 12345));
+        let public = Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            12345,
+        ));
         assert_eq!(client_ip(&headers, public), "8.8.8.8");
     }
 }

@@ -489,7 +489,7 @@ impl<'a> ClientRepository<'a> {
     /// All clients with fields needed for public theme RPC.
     pub async fn list_for_public_api(&self) -> DbResult<Vec<PublicClientRow>> {
         let rows: Vec<PublicClientRowRaw> = sqlx::query_as(
-            "SELECT uuid, name, sort_order, online, disabled, ipv4, ipv6, region, region6,
+            "SELECT uuid, name, COALESCE(sort_order, 1e18) AS sort_order, online, disabled, ipv4, ipv6, region, region6,
                     agent_version,
                     group_name, private_remark, price, billing_cycle, currency,
                     expired_at, created_at, updated_at, basic_info_json,
@@ -498,7 +498,7 @@ impl<'a> ClientRepository<'a> {
                     last_net_total_up, last_net_total_down, last_uptime_secs,
                     bandwidth, bandwidth_unit
              FROM clients
-             ORDER BY sort_order ASC, created_at ASC, uuid ASC",
+             ORDER BY COALESCE(sort_order, 1e18) ASC, created_at ASC, uuid ASC",
         )
         .fetch_all(self.pool)
         .await?;
@@ -543,7 +543,7 @@ impl<'a> ClientRepository<'a> {
     /// 列出全部客户端（管理台与公开 API）。
     pub async fn list(&self) -> DbResult<Vec<ClientRecord>> {
         let rows: Vec<(String, String, i64, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT uuid, name, online, agent_version, last_seen_at FROM clients ORDER BY sort_order ASC, created_at ASC",
+            "SELECT uuid, name, online, agent_version, last_seen_at FROM clients ORDER BY COALESCE(sort_order, 1e18) ASC, created_at ASC",
         )
         .fetch_all(self.pool)
         .await?;
@@ -586,18 +586,18 @@ impl<'a> ClientRepository<'a> {
                         traffic_used_up, traffic_used_down, traffic_cycle_start,
                         traffic_reset_mode, last_net_total_up, last_net_total_down,
                         last_uptime_secs, bandwidth, bandwidth_unit, report_interval_ms,
-                        sort_order
+                        COALESCE(sort_order, 1e18) AS sort_order
                  FROM clients
-                 WHERE sort_order > ?
-                    OR (sort_order = ? AND created_at > ?)
-                    OR (sort_order = ? AND created_at = ? AND uuid > ?)
-                 ORDER BY sort_order ASC, created_at ASC, uuid ASC
+                 WHERE COALESCE(sort_order, 1e18) > ?
+                    OR (COALESCE(sort_order, 1e18) = ? AND created_at > ?)
+                    OR (COALESCE(sort_order, 1e18) = ? AND created_at = ? AND uuid > ?)
+                 ORDER BY COALESCE(sort_order, 1e18) ASC, created_at ASC, uuid ASC
                  LIMIT ?",
             )
-            .bind(after_sort)
-            .bind(after_sort)
+            .bind(after_sort.unwrap_or(1e18))
+            .bind(after_sort.unwrap_or(1e18))
             .bind(after_created.clone())
-            .bind(after_sort)
+            .bind(after_sort.unwrap_or(1e18))
             .bind(after_created)
             .bind(after_uuid)
             .bind(fetch_limit)
@@ -613,9 +613,9 @@ impl<'a> ClientRepository<'a> {
                         traffic_used_up, traffic_used_down, traffic_cycle_start,
                         traffic_reset_mode, last_net_total_up, last_net_total_down,
                         last_uptime_secs, bandwidth, bandwidth_unit, report_interval_ms,
-                        sort_order
+                        COALESCE(sort_order, 1e18) AS sort_order
                  FROM clients
-                 ORDER BY sort_order ASC, created_at ASC, uuid ASC
+                 ORDER BY COALESCE(sort_order, 1e18) ASC, created_at ASC, uuid ASC
                  LIMIT ?",
             )
             .bind(fetch_limit)
@@ -1095,7 +1095,7 @@ impl<'a> ClientRepository<'a> {
     /// 拖拽排序：把 uuid 移到 before_uuid 之前（None = 末尾），随后全量重写序号。
     pub async fn reorder_client(&self, uuid: &str, before_uuid: Option<&str>) -> DbResult<()> {
         let mut ordered: Vec<String> = sqlx::query_scalar(
-            "SELECT uuid FROM clients ORDER BY sort_order ASC, created_at ASC, uuid ASC",
+            "SELECT uuid FROM clients ORDER BY COALESCE(sort_order, 1e18) ASC, created_at ASC, uuid ASC",
         )
         .fetch_all(self.pool)
         .await?;

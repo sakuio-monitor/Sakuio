@@ -11,14 +11,34 @@ struct GodaddyDriver;
 
 #[async_trait]
 impl DdnsDriver for GodaddyDriver {
-    fn id(&self) -> &'static str { "godaddy" }
-    fn name(&self) -> &'static str { "GoDaddy" }
-    fn description(&self) -> &'static str { "GoDaddy API Key / Secret，自动维护 A/AAAA 记录" }
+    fn id(&self) -> &'static str {
+        "godaddy"
+    }
+    fn name(&self) -> &'static str {
+        "GoDaddy"
+    }
+    fn description(&self) -> &'static str {
+        "GoDaddy API Key / Secret，自动维护 A/AAAA 记录"
+    }
 
     fn fields(&self) -> Vec<DriverField> {
         vec![
-            DriverField { key: "api_key", label: "API Key", kind: "password", required: true, placeholder: "GoDaddy API Key", options: None },
-            DriverField { key: "api_secret", label: "API Secret", kind: "password", required: true, placeholder: "GoDaddy API Secret", options: None },
+            DriverField {
+                key: "api_key",
+                label: "API Key",
+                kind: "password",
+                required: true,
+                placeholder: "GoDaddy API Key",
+                options: None,
+            },
+            DriverField {
+                key: "api_secret",
+                label: "API Secret",
+                kind: "password",
+                required: true,
+                placeholder: "GoDaddy API Secret",
+                options: None,
+            },
         ]
     }
 
@@ -37,14 +57,20 @@ impl DdnsDriver for GodaddyDriver {
         if record_type != "A" && record_type != "AAAA" {
             return Err("GoDaddy 仅支持 A/AAAA".into());
         }
-        let name = if request.record_name.trim().is_empty() { "@" } else { request.record_name.trim() };
+        let name = if request.record_name.trim().is_empty() {
+            "@"
+        } else {
+            request.record_name.trim()
+        };
         let body = json!([{
             "data": request.content,
             "name": name,
             "ttl": request.ttl.max(600),
         }]);
         let response = client
-            .put(format!("https://api.godaddy.com/v1/domains/{zone}/records/{record_type}/{name}"))
+            .put(format!(
+                "https://api.godaddy.com/v1/domains/{zone}/records/{record_type}/{name}"
+            ))
             .header("Authorization", format!("sso-key {key}:{secret}"))
             .json(&body)
             .send()
@@ -53,7 +79,10 @@ impl DdnsDriver for GodaddyDriver {
         if !response.status().is_success() {
             return Err(common::error_message(response).await);
         }
-        Ok(DdnsResult { zone_id: zone.to_string(), record_id: String::new() })
+        Ok(DdnsResult {
+            zone_id: zone.to_string(),
+            record_id: String::new(),
+        })
     }
 }
 
@@ -66,7 +95,10 @@ mod tests {
     #[test]
     fn driver_metadata() {
         assert_eq!(GodaddyDriver.id(), "godaddy");
-        assert!(GodaddyDriver.fields().iter().any(|field| field.key == "api_key"));
+        assert!(GodaddyDriver
+            .fields()
+            .iter()
+            .any(|field| field.key == "api_key"));
     }
 
     #[tokio::test]

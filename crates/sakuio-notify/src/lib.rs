@@ -12,5 +12,7 @@ use std::sync::Arc;
 /// Registers built-in notification channels (SMTP, Server酱).
 pub async fn register_builtin(registry: &Registry) {
     registry.register(Arc::new(channels::SmtpChannel)).await;
-    registry.register(Arc::new(channels::ServerChanChannel)).await;
+    registry
+        .register(Arc::new(channels::ServerChanChannel))
+        .await;
 }

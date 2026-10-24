@@ -144,7 +144,10 @@ impl ThemeService {
         source: Option<String>,
         force: bool,
     ) -> Result<Vec<MarketTheme>, String> {
-        match source.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()) {
+        match source
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
             Some(url) => market::MarketClient::new(url)?.catalog(force).await,
             None => self.market.catalog(force).await,
         }
@@ -303,7 +306,10 @@ impl ThemeService {
         let service = self.clone();
         let task = job.clone();
         tokio::spawn(async move {
-            let market = match source.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()) {
+            let market = match source
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
                 Some(url) => match market::MarketClient::new(url) {
                     Ok(client) => client,
                     Err(error) => {
@@ -359,7 +365,11 @@ impl ThemeService {
             .find(short, force_catalog)
             .await?
             .ok_or_else(|| format!("theme {short} not found in market"))?;
-        if let Some(proxy) = proxy.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        if let Some(proxy) = proxy
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             if is_github_url(&entry.download) {
                 entry.download = format!("{}/{}", proxy.trim_end_matches('/'), entry.download);
             }
@@ -402,7 +412,10 @@ impl ThemeService {
         let service = self.clone();
         let task = job.clone();
         tokio::spawn(async move {
-            if let Err(error) = service.run_update(&task, &short, force_catalog, proxy).await {
+            if let Err(error) = service
+                .run_update(&task, &short, force_catalog, proxy)
+                .await
+            {
                 tracing::warn!(theme = %short, error = %error, "theme update failed");
                 task.fail(error);
             }
@@ -426,7 +439,11 @@ impl ThemeService {
                 .find(market_short, force_catalog)
                 .await?
                 .ok_or_else(|| format!("theme {market_short} is no longer in the market"))?;
-            if let Some(proxy) = proxy.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(proxy) = proxy
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
                 if is_github_url(&entry.download) {
                     entry.download = format!("{}/{}", proxy.trim_end_matches('/'), entry.download);
                 }

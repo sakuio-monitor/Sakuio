@@ -287,7 +287,7 @@ impl<'a> PingRepository<'a> {
                 sqlx::query_as(
                     "SELECT client_uuid, task_id, observed_at_ms, value_ms FROM ping_records
                      WHERE client_uuid = ? AND task_id = ? AND observed_at_ms >= ? AND observed_at_ms <= ?
-                     ORDER BY observed_at_ms ASC LIMIT ?",
+                     ORDER BY observed_at_ms DESC LIMIT ?",
                 )
                 .bind(uuid)
                 .bind(tid)
@@ -301,7 +301,7 @@ impl<'a> PingRepository<'a> {
                 sqlx::query_as(
                     "SELECT client_uuid, task_id, observed_at_ms, value_ms FROM ping_records
                      WHERE client_uuid = ? AND observed_at_ms >= ? AND observed_at_ms <= ?
-                     ORDER BY observed_at_ms ASC LIMIT ?",
+                     ORDER BY observed_at_ms DESC LIMIT ?",
                 )
                 .bind(uuid)
                 .bind(since_ms)
@@ -314,7 +314,7 @@ impl<'a> PingRepository<'a> {
                 sqlx::query_as(
                     "SELECT client_uuid, task_id, observed_at_ms, value_ms FROM ping_records
                      WHERE task_id = ? AND observed_at_ms >= ? AND observed_at_ms <= ?
-                     ORDER BY observed_at_ms ASC LIMIT ?",
+                     ORDER BY observed_at_ms DESC LIMIT ?",
                 )
                 .bind(tid)
                 .bind(since_ms)
@@ -327,7 +327,7 @@ impl<'a> PingRepository<'a> {
                 sqlx::query_as(
                     "SELECT client_uuid, task_id, observed_at_ms, value_ms FROM ping_records
                      WHERE observed_at_ms >= ? AND observed_at_ms <= ?
-                     ORDER BY observed_at_ms ASC LIMIT ?",
+                     ORDER BY observed_at_ms DESC LIMIT ?",
                 )
                 .bind(since_ms)
                 .bind(until_ms)
@@ -336,6 +336,8 @@ impl<'a> PingRepository<'a> {
                 .await?
             }
         };
+        let mut rows = rows;
+        rows.reverse();
         Ok(rows
             .into_iter()
             .map(|(client, task_id, ms, value)| PingRecordRow {

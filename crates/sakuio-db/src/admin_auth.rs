@@ -117,13 +117,12 @@ impl<'a> AdminAuthRepository<'a> {
     }
 
     pub async fn username_exists(&self, username: &str, except_user_id: &str) -> DbResult<bool> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM admin_users WHERE username = ? AND id <> ? LIMIT 1",
-        )
-        .bind(username)
-        .bind(except_user_id)
-        .fetch_optional(self.pool)
-        .await?;
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM admin_users WHERE username = ? AND id <> ? LIMIT 1")
+                .bind(username)
+                .bind(except_user_id)
+                .fetch_optional(self.pool)
+                .await?;
         Ok(row.is_some())
     }
 

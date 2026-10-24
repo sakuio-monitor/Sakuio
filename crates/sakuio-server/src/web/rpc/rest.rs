@@ -3,8 +3,8 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::AppState;
 use crate::web::respond::{api_error, api_success, rpc_http_status};
+use crate::AppState;
 
 use super::dispatch::dispatch;
 
@@ -43,10 +43,7 @@ pub async fn api_nodes(state: State<AppState>) -> impl IntoResponse {
     bind_standard(state, "public:getNodesInformation", Value::Null).await
 }
 
-pub async fn api_recent(
-    state: State<AppState>,
-    Path(uuid): Path<String>,
-) -> impl IntoResponse {
+pub async fn api_recent(state: State<AppState>, Path(uuid): Path<String>) -> impl IntoResponse {
     bind_standard(
         state,
         "public:getClientRecentRecords",
@@ -109,10 +106,7 @@ pub async fn admin_ping_list(state: State<AppState>) -> impl IntoResponse {
     bind_standard(state, "admin:getAllPingTasks", Value::Null).await
 }
 
-pub async fn admin_ping_add(
-    state: State<AppState>,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
+pub async fn admin_ping_add(state: State<AppState>, body: axum::body::Bytes) -> impl IntoResponse {
     let params = parse_json_body(&body);
     bind_standard(state, "admin:addPingTask", params).await
 }
@@ -125,10 +119,7 @@ pub async fn admin_ping_delete(
     bind_standard(state, "admin:deletePingTask", params).await
 }
 
-pub async fn admin_ping_edit(
-    state: State<AppState>,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
+pub async fn admin_ping_edit(state: State<AppState>, body: axum::body::Bytes) -> impl IntoResponse {
     let params = parse_json_body(&body);
     bind_standard(state, "admin:editPingTask", params).await
 }

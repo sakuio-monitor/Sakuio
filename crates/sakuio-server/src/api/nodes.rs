@@ -451,7 +451,8 @@ pub async fn update_admin_agent(
     Path(uuid): Path<String>,
     _user: crate::auth::AdminUser,
 ) -> impl IntoResponse {
-    let target_version = match crate::agent_version::latest_supported(AGENT_VERSION_RANGE_MAX).await {
+    let target_version = match crate::agent_version::latest_supported(AGENT_VERSION_RANGE_MAX).await
+    {
         Ok(Some(version)) => version,
         Ok(None) => {
             return (

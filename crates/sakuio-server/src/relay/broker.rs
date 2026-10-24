@@ -130,7 +130,9 @@ impl RelayBroker {
     pub async fn open_client_download(&self, relay_id: &str) -> mpsc::Receiver<Vec<u8>> {
         let (tx, rx) = mpsc::channel::<Vec<u8>>(CHANNEL_CAP);
         let mut guard = self.inner.write().await;
-        let slot = guard.entry(relay_id.to_string()).or_insert_with(|| Slot::new(None));
+        let slot = guard
+            .entry(relay_id.to_string())
+            .or_insert_with(|| Slot::new(None));
         slot.to_client = Some(tx);
         rx
     }
@@ -138,12 +140,19 @@ impl RelayBroker {
     pub async fn bind_upload_feed(&self, relay_id: &str) -> mpsc::Sender<Vec<u8>> {
         let (tx, rx) = mpsc::channel::<Vec<u8>>(CHANNEL_CAP);
         let mut guard = self.inner.write().await;
-        let slot = guard.entry(relay_id.to_string()).or_insert_with(|| Slot::new(None));
+        let slot = guard
+            .entry(relay_id.to_string())
+            .or_insert_with(|| Slot::new(None));
         slot.pending_upload_rx = Some(rx);
         tx
     }
 
-    pub async fn attach_agent_for(&self, relay_id: &str, node_uuid: &str, socket: WebSocket) -> bool {
+    pub async fn attach_agent_for(
+        &self,
+        relay_id: &str,
+        node_uuid: &str,
+        socket: WebSocket,
+    ) -> bool {
         let owner = {
             let guard = self.inner.read().await;
             guard
@@ -176,7 +185,9 @@ impl RelayBroker {
 
         let mut pending_upload_rx = {
             let mut guard = self.inner.write().await;
-            let slot = guard.entry(relay_id.to_string()).or_insert_with(|| Slot::new(None));
+            let slot = guard
+                .entry(relay_id.to_string())
+                .or_insert_with(|| Slot::new(None));
             slot.to_agent = Some(to_agent_tx.clone());
             let pending = std::mem::take(&mut slot.pending_to_agent);
             let upload = slot.pending_upload_rx.take();
@@ -263,7 +274,9 @@ impl RelayBroker {
 
         let pending_out = {
             let mut guard = self.inner.write().await;
-            let slot = guard.entry(relay_id.to_string()).or_insert_with(|| Slot::new(None));
+            let slot = guard
+                .entry(relay_id.to_string())
+                .or_insert_with(|| Slot::new(None));
             slot.to_client = Some(to_client_tx.clone());
             std::mem::take(&mut slot.pending_to_client)
         };

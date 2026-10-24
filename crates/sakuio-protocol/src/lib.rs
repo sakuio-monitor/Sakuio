@@ -8,14 +8,15 @@ mod sktl;
 mod telemetry;
 
 pub use control::{
-    AgentVersionRange, BasicInfoParams, ConfigParams, ControlMessage, ControlOp, HelloParams,
-    SyncCommandItem, SyncReqParams, SyncRespParams, TelemetryAckParams, WelcomeParams,
-    AgentUpdateParams, AGENT_VERSION_RANGE_MAX, AGENT_VERSION_RANGE_MIN,
-    DEFAULT_TELEMETRY_INTERVAL_MS, METHOD_AGENT_UPDATE,
+    AgentUpdateParams, AgentVersionRange, BasicInfoParams, ConfigParams, ControlMessage, ControlOp,
+    HelloParams, SyncCommandItem, SyncReqParams, SyncRespParams, TelemetryAckParams, WelcomeParams,
+    AGENT_VERSION_RANGE_MAX, AGENT_VERSION_RANGE_MIN, DEFAULT_TELEMETRY_INTERVAL_MS,
+    METHOD_AGENT_UPDATE,
 };
-pub use sktl::{decode_sktl, encode_sktl, SkltPayload, SKTL_MAGIC};
 pub use ping::{
-    AgentPingBatchParams, AgentPingBatchResultParams, AgentPingParams, AgentPingResultParams, METHOD_AGENT_PING, METHOD_AGENT_PING_BATCH, METHOD_AGENT_PING_BATCH_RESULT, METHOD_AGENT_PING_RESULT,
+    AgentPingBatchParams, AgentPingBatchResultParams, AgentPingParams, AgentPingResultParams,
+    METHOD_AGENT_PING, METHOD_AGENT_PING_BATCH, METHOD_AGENT_PING_BATCH_RESULT,
+    METHOD_AGENT_PING_RESULT,
 };
 pub use remote::{
     BoardRelaySpec, RemoteExecOpen, RemoteExecResultParams, RemoteFileCommand, RemoteFileResult,
@@ -23,6 +24,7 @@ pub use remote::{
     METHOD_REMOTE_EXEC_RESULT, METHOD_REMOTE_FILE, METHOD_REMOTE_FILE_RESULT, METHOD_REMOTE_SHELL,
     METHOD_REMOTE_STREAM_READ, METHOD_REMOTE_STREAM_WRITE,
 };
+pub use sktl::{decode_sktl, encode_sktl, SkltPayload, SKTL_MAGIC};
 pub use telemetry::{
     ConnectionsReport, CpuReport, GpuDetailedReport, GpuDeviceReport, GpuModelsReport, LoadReport,
     NetworkReport, TelemetryBatch, TelemetrySample, UsageReport,

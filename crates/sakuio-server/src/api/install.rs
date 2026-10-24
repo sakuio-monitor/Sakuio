@@ -18,7 +18,9 @@ pub async fn install_status(State(state): State<AppState>) -> impl IntoResponse 
     let service = InstallService::new(&state.db);
     let configured = crate::config::ServerConfig::load_or_create()
         .ok()
-        .is_some_and(|config| config.database.is_configured() && config.database.dsn() == state.db.dsn());
+        .is_some_and(|config| {
+            config.database.is_configured() && config.database.dsn() == state.db.dsn()
+        });
     match service.status().await {
         Ok(status) => Json(serde_json::json!({
             "state": status.state,

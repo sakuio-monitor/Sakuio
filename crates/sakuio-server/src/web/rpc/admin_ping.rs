@@ -21,12 +21,13 @@ pub async fn admin_add_ping_task(
 ) -> Result<Value, (i32, &'static str)> {
     let p = params.ok_or((-32602, "Invalid params"))?;
     let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
-    let target = p.get("target").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let target = p
+        .get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
     let task_type = p.get("type").and_then(|v| v.as_str()).unwrap_or("").trim();
-    let interval = p
-        .get("interval")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as i32;
+    let interval = p.get("interval").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
     let default_on = p
         .get("default_on")
         .and_then(|v| v.as_bool())
@@ -93,8 +94,8 @@ pub async fn admin_edit_ping_task(
     }
     let mut tasks = Vec::with_capacity(tasks_val.len());
     for item in tasks_val {
-        let task: PingTaskRow = serde_json::from_value(item.clone())
-            .map_err(|_| (-32602, "Invalid request data"))?;
+        let task: PingTaskRow =
+            serde_json::from_value(item.clone()).map_err(|_| (-32602, "Invalid request data"))?;
         if task.id <= 0 {
             return Err((-32602, "Invalid request data"));
         }
@@ -113,7 +114,9 @@ pub async fn admin_order_ping_task(
     params: Option<&Value>,
 ) -> Result<Value, (i32, &'static str)> {
     let p = params.ok_or((-32602, "Invalid or missing request body"))?;
-    let obj = p.as_object().ok_or((-32602, "Invalid or missing request body"))?;
+    let obj = p
+        .as_object()
+        .ok_or((-32602, "Invalid or missing request body"))?;
     if obj.is_empty() {
         return Ok(Value::Null);
     }

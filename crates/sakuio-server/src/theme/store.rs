@@ -83,12 +83,12 @@ impl ThemeStore {
         let dir = self
             .theme_dir(short)
             .ok_or_else(|| format!("invalid theme name: {short}"))?;
-        let name = manifest_name(&dir)
-            .ok_or_else(|| format!("theme {short} is missing sakuio-theme.json or komari-theme.json"))?;
-        let raw = std::fs::read(dir.join(name))
-            .map_err(|e| format!("read {short}/{name}: {e}"))?;
-        let manifest: ThemeManifest = serde_json::from_slice(&raw)
-            .map_err(|e| format!("parse {short}/{name}: {e}"))?;
+        let name = manifest_name(&dir).ok_or_else(|| {
+            format!("theme {short} is missing sakuio-theme.json or komari-theme.json")
+        })?;
+        let raw = std::fs::read(dir.join(name)).map_err(|e| format!("read {short}/{name}: {e}"))?;
+        let manifest: ThemeManifest =
+            serde_json::from_slice(&raw).map_err(|e| format!("parse {short}/{name}: {e}"))?;
         manifest.validate()?;
         if manifest.short != short {
             return Err(format!(

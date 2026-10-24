@@ -46,7 +46,8 @@ impl BoardSession for WsBoardSession {
             match msg {
                 Message::Text(text) => {
                     let bytes = text.as_bytes();
-                    let control = ControlMessage::from_json_bytes(bytes).map_err(|e| e.to_string())?;
+                    let control =
+                        ControlMessage::from_json_bytes(bytes).map_err(|e| e.to_string())?;
                     return Ok(Some(BoardFrame::Control(control)));
                 }
                 Message::Binary(bin) => {

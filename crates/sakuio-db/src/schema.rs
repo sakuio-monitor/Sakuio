@@ -222,7 +222,10 @@ pub static TABLES: &[TableDef] = &[
         ],
         pk: &["uuid"],
         fks: &[],
-        indexes: &[uniq("uq_clients_token", &["token"])],
+        indexes: &[
+            uniq("uq_clients_token", &["token"]),
+            idx("idx_clients_sort", &["sort_order", "created_at", "uuid"]),
+        ],
     },
     TableDef {
         name: "metric_samples",
@@ -292,7 +295,22 @@ pub static TABLES: &[TableDef] = &[
                     "bucket_start_ms",
                 ],
             ),
+            idx(
+                "idx_metric_buckets_node_window_time",
+                &["node_uuid", "bucket_seconds", "bucket_start_ms"],
+            ),
         ],
+    },
+    TableDef {
+        name: "metric_checkpoints",
+        cols: &[
+            req("node_uuid", Key),
+            req("checkpoint_ms", BigInt),
+            req("payload", Text),
+        ],
+        pk: &["node_uuid"],
+        fks: &[],
+        indexes: &[],
     },
     TableDef {
         name: "metric_retention",
@@ -341,6 +359,10 @@ pub static TABLES: &[TableDef] = &[
                 &["client_uuid", "observed_at_ms"],
             ),
             idx("idx_ping_records_task_time", &["task_id", "observed_at_ms"]),
+            idx(
+                "idx_ping_records_client_task_time",
+                &["client_uuid", "task_id", "observed_at_ms"],
+            ),
         ],
     },
     TableDef {

@@ -200,9 +200,7 @@ impl BoardStateStore for MemoryBoardStore {
             .filter(|s| s.observed_at_ms() >= since_ms)
             .filter_map(|s| match s {
                 RecentSample::Full(sample) => Some(sample.clone()),
-                RecentSample::Encoded { bytes, .. } => {
-                    cbor4ii::serde::from_slice(bytes).ok()
-                }
+                RecentSample::Encoded { bytes, .. } => cbor4ii::serde::from_slice(bytes).ok(),
             })
             .collect())
     }

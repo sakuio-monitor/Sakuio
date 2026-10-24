@@ -63,7 +63,5 @@ pub async fn public_ip() -> Result<String, String> {
 fn is_mmdb(bytes: &[u8]) -> bool {
     const MARKER: &[u8] = b"\xab\xcd\xefMaxMind.com";
     let start = bytes.len().saturating_sub(256 * 1024);
-    bytes[start..]
-        .windows(MARKER.len())
-        .any(|w| w == MARKER)
+    bytes[start..].windows(MARKER.len()).any(|w| w == MARKER)
 }

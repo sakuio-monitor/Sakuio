@@ -107,6 +107,21 @@ async fn metric_store_works_on_every_backend() {
             .insert_buckets(&rows)
             .await
             .unwrap_or_else(|e| panic!("{} bucket insert failed: {e}", backend.name));
+        let checkpoint_rows = vec![bucket(&node, "cpu.usage", 60, start, 10.0)];
+        store
+            .save_checkpoints(&checkpoint_rows)
+            .await
+            .unwrap_or_else(|e| panic!("{} checkpoint save failed: {e}", backend.name));
+        let loaded = store
+            .load_checkpoints()
+            .await
+            .unwrap_or_else(|e| panic!("{} checkpoint load failed: {e}", backend.name));
+        assert_eq!(loaded.get(&node).map(Vec::len), Some(1));
+        store
+            .clear_checkpoints()
+            .await
+            .unwrap_or_else(|e| panic!("{} checkpoint clear failed: {e}", backend.name));
+
         let listed = store
             .list_buckets(&node, 60, start, start + 60_000, 100)
             .await

@@ -20,9 +20,7 @@ pub struct ChangePasswordBody {
 }
 
 fn valid_username(username: &str) -> bool {
-    !username.is_empty()
-        && username.len() <= 64
-        && !username.chars().any(char::is_control)
+    !username.is_empty() && username.len() <= 64 && !username.chars().any(char::is_control)
 }
 
 pub async fn change_username(

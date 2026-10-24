@@ -14,11 +14,34 @@ use std::sync::Arc;
 
 const API: &str = "https://alidns.aliyuncs.com/";
 const ENCODE_SET: &AsciiSet = &CONTROLS
-    .add(b' ').add(b'"').add(b'#').add(b'$').add(b'%').add(b'&')
-    .add(b'\'').add(b'(').add(b')').add(b'*').add(b'+').add(b',')
-    .add(b'/').add(b':').add(b';').add(b'<').add(b'=').add(b'>')
-    .add(b'?').add(b'@').add(b'[').add(b'\\').add(b']').add(b'^')
-    .add(b'`').add(b'{').add(b'|').add(b'}');
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'$')
+    .add(b'%')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'(')
+    .add(b')')
+    .add(b'*')
+    .add(b'+')
+    .add(b',')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'<')
+    .add(b'=')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 struct AliyunDriver;
 
@@ -38,7 +61,11 @@ fn sign(secret: &str, method: &str, params: &BTreeMap<String, String>) -> String
     base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
 }
 
-async fn call(config: &Value, action: &str, mut params: BTreeMap<String, String>) -> Result<Value, String> {
+async fn call(
+    config: &Value,
+    action: &str,
+    mut params: BTreeMap<String, String>,
+) -> Result<Value, String> {
     let access_key = common::required(config, "access_key_id", "AccessKey ID")?;
     let secret = common::required(config, "access_key_secret", "AccessKey Secret")?;
     let client = common::client()?;
@@ -48,7 +75,10 @@ async fn call(config: &Value, action: &str, mut params: BTreeMap<String, String>
     params.insert("SignatureMethod".into(), "HMAC-SHA1".into());
     params.insert("SignatureNonce".into(), uuid::Uuid::new_v4().to_string());
     params.insert("SignatureVersion".into(), "1.0".into());
-    params.insert("Timestamp".into(), chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    params.insert(
+        "Timestamp".into(),
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    );
     params.insert("Version".into(), "2015-01-09".into());
     let signature = sign(&secret, "GET", &params);
     params.insert("Signature".into(), signature);
@@ -61,7 +91,10 @@ async fn call(config: &Value, action: &str, mut params: BTreeMap<String, String>
     if !response.status().is_success() {
         return Err(common::error_message(response).await);
     }
-    response.json().await.map_err(|error| format!("解析阿里云响应失败：{error}"))
+    response
+        .json()
+        .await
+        .map_err(|error| format!("解析阿里云响应失败：{error}"))
 }
 
 fn record_id(value: &Value, rr: &str, record_type: &str) -> Option<String> {
@@ -82,14 +115,34 @@ fn record_id(value: &Value, rr: &str, record_type: &str) -> Option<String> {
 
 #[async_trait]
 impl DdnsDriver for AliyunDriver {
-    fn id(&self) -> &'static str { "aliyun" }
-    fn name(&self) -> &'static str { "阿里云" }
-    fn description(&self) -> &'static str { "阿里云 AccessKey，自动维护 A/AAAA 记录" }
+    fn id(&self) -> &'static str {
+        "aliyun"
+    }
+    fn name(&self) -> &'static str {
+        "阿里云"
+    }
+    fn description(&self) -> &'static str {
+        "阿里云 AccessKey，自动维护 A/AAAA 记录"
+    }
 
     fn fields(&self) -> Vec<DriverField> {
         vec![
-            DriverField { key: "access_key_id", label: "AccessKey ID", kind: "text", required: true, placeholder: "阿里云 AccessKey ID", options: None },
-            DriverField { key: "access_key_secret", label: "AccessKey Secret", kind: "password", required: true, placeholder: "阿里云 AccessKey Secret", options: None },
+            DriverField {
+                key: "access_key_id",
+                label: "AccessKey ID",
+                kind: "text",
+                required: true,
+                placeholder: "阿里云 AccessKey ID",
+                options: None,
+            },
+            DriverField {
+                key: "access_key_secret",
+                label: "AccessKey Secret",
+                kind: "password",
+                required: true,
+                placeholder: "阿里云 AccessKey Secret",
+                options: None,
+            },
         ]
     }
 
@@ -101,7 +154,11 @@ impl DdnsDriver for AliyunDriver {
 
     async fn update(&self, config: &Value, request: &DdnsUpdate) -> Result<DdnsResult, String> {
         let zone = request.zone_name.trim().trim_end_matches('.');
-        let rr = if request.record_name.trim().is_empty() { "@" } else { request.record_name.trim() };
+        let rr = if request.record_name.trim().is_empty() {
+            "@"
+        } else {
+            request.record_name.trim()
+        };
         let record_type = request.record_type.to_ascii_uppercase();
         let mut id = request.record_id.clone().filter(|value| !value.is_empty());
         if id.is_none() {
@@ -122,11 +179,21 @@ impl DdnsDriver for AliyunDriver {
         if let Some(id) = id {
             params.insert("RecordId".into(), id.clone());
             call(config, "UpdateDomainRecord", params).await?;
-            Ok(DdnsResult { zone_id: zone.into(), record_id: id })
+            Ok(DdnsResult {
+                zone_id: zone.into(),
+                record_id: id,
+            })
         } else {
             let value = call(config, "AddDomainRecord", params).await?;
-            let id = value.get("RecordId").and_then(Value::as_str).unwrap_or_default().to_string();
-            Ok(DdnsResult { zone_id: zone.into(), record_id: id })
+            let id = value
+                .get("RecordId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Ok(DdnsResult {
+                zone_id: zone.into(),
+                record_id: id,
+            })
         }
     }
 }

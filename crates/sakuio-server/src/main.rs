@@ -1,7 +1,7 @@
+mod agent_version;
 mod alloc_metrics;
 mod api;
 mod audit;
-mod agent_version;
 mod audit_api;
 mod auth;
 mod billing_watcher;
@@ -47,7 +47,8 @@ use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
 
 #[cfg(feature = "embedded-admin")]
-static EMBEDDED_ADMIN: include_dir::Dir<'static> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/admin-dist");
+static EMBEDDED_ADMIN: include_dir::Dir<'static> =
+    include_dir::include_dir!("$CARGO_MANIFEST_DIR/admin-dist");
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: alloc_metrics::TrackingAllocator = alloc_metrics::TrackingAllocator;
@@ -76,7 +77,10 @@ pub struct AppState {
 
 fn read_local_admin_file(relative: &str) -> Option<Vec<u8>> {
     let relative = relative.trim_start_matches('/');
-    if relative.split('/').any(|segment| segment == ".." || segment.starts_with('.')) {
+    if relative
+        .split('/')
+        .any(|segment| segment == ".." || segment.starts_with('.'))
+    {
         return None;
     }
     let configured = std::env::var("SAKUIO_ADMIN_DIR").ok();
@@ -135,7 +139,11 @@ fn mime_for_admin(path: &str) -> String {
 async fn admin_serve(state: &AppState, path: &str, method: &Method) -> Option<Response> {
     let relative = path.strip_prefix("/admin").unwrap_or(path);
     let relative = relative.trim_start_matches('/');
-    let requested = if relative.is_empty() { "index.html" } else { relative };
+    let requested = if relative.is_empty() {
+        "index.html"
+    } else {
+        relative
+    };
     let mut file = state.theme.read_admin_asset(requested).await;
     if file.is_none() {
         if let Some(bytes) = read_local_admin_file(requested) {
@@ -266,7 +274,9 @@ async fn theme_serve(State(state): State<AppState>, request: Request) -> Respons
         .into_response()
 }
 
-async fn open_app_database(config: &config::ServerConfig) -> anyhow::Result<sakuio_db::AppDatabase> {
+async fn open_app_database(
+    config: &config::ServerConfig,
+) -> anyhow::Result<sakuio_db::AppDatabase> {
     if let Ok(dsn) = std::env::var("SAKUIO_DATABASE_DSN") {
         let max = std::env::var("SAKUIO_DB_MAX_CONNECTIONS")
             .ok()
@@ -275,14 +285,12 @@ async fn open_app_database(config: &config::ServerConfig) -> anyhow::Result<saku
         return Ok(sakuio_db::AppDatabase::connect_with_max(&dsn, true, max).await?);
     }
     if config.database.is_configured() {
-        return Ok(
-            sakuio_db::AppDatabase::connect_with_max(
-                &config.database.dsn(),
-                true,
-                config.database.max_connections,
-            )
-            .await?,
-        );
+        return Ok(sakuio_db::AppDatabase::connect_with_max(
+            &config.database.dsn(),
+            true,
+            config.database.max_connections,
+        )
+        .await?);
     }
     // The setup wizard needs a working in-memory database before the user has
     // chosen where the real database should live. Using a single connection is
@@ -329,8 +337,7 @@ async fn main() -> anyhow::Result<()> {
         metric_cfg.dsn = config.metric_database.dsn();
         metric_cfg.max_connections = config.metric_database.max_connections();
         metric_cfg.save(&pool).await?;
-    }
-    else if !metric_cfg.dsn.trim().is_empty() {
+    } else if !metric_cfg.dsn.trim().is_empty() {
         config.set_metric_database(&metric_cfg.dsn, metric_cfg.max_connections);
         config.save()?;
     }

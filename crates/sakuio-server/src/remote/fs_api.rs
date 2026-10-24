@@ -3,11 +3,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::Response;
 use axum::routing::{delete, get, post};
-use std::convert::Infallible;
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::convert::Infallible;
 use uuid::Uuid;
 
 use crate::auth::AdminUser;
@@ -19,46 +19,34 @@ use sakuio_protocol::{RemoteStreamRead, RemoteStreamWrite};
 
 pub fn fs_routes() -> Router<AppState> {
     Router::new()
-        .route(
-            "/api/admin/nodes/:uuid/fs/roots",
-            get(fs_roots),
-        )
-        .route(
-            "/api/admin/nodes/:uuid/fs/list",
-            get(fs_list),
-        )
-        .route(
-            "/api/admin/nodes/:uuid/fs/stat",
-            get(fs_stat),
-        )
-        .route(
-            "/api/admin/nodes/:uuid/fs/mkdir",
-            post(fs_mkdir),
-        )
-        .route(
-            "/api/admin/nodes/:uuid/fs/delete",
-            delete(fs_delete),
-        )
-        .route(
-            "/api/admin/nodes/:uuid/fs/move",
-            post(fs_move),
-        )
-        .route(
-            "/api/admin/nodes/:uuid/fs/copy",
-            post(fs_copy),
-        )
+        .route("/api/admin/nodes/:uuid/fs/roots", get(fs_roots))
+        .route("/api/admin/nodes/:uuid/fs/list", get(fs_list))
+        .route("/api/admin/nodes/:uuid/fs/stat", get(fs_stat))
+        .route("/api/admin/nodes/:uuid/fs/mkdir", post(fs_mkdir))
+        .route("/api/admin/nodes/:uuid/fs/delete", delete(fs_delete))
+        .route("/api/admin/nodes/:uuid/fs/move", post(fs_move))
+        .route("/api/admin/nodes/:uuid/fs/copy", post(fs_copy))
         .route(
             "/api/admin/nodes/:uuid/fs/text",
             get(fs_read_text).put(fs_write_text),
         )
-        .route("/api/admin/nodes/:uuid/fs/raw", get(fs_download).put(fs_upload))
+        .route(
+            "/api/admin/nodes/:uuid/fs/raw",
+            get(fs_download).put(fs_upload),
+        )
         .route("/api/admin/nodes/:uuid/fs/search", get(fs_search))
         .route("/api/admin/nodes/:uuid/fs/rename", post(fs_rename))
         .route("/api/admin/nodes/:uuid/fs/chmod", post(fs_chmod))
         .route("/api/admin/nodes/:uuid/fs/chown", post(fs_chown))
         .route("/api/admin/nodes/:uuid/fs/trash", get(fs_trash_list))
-        .route("/api/admin/nodes/:uuid/fs/trash/restore", post(fs_trash_restore))
-        .route("/api/admin/nodes/:uuid/fs/trash/empty", post(fs_trash_empty))
+        .route(
+            "/api/admin/nodes/:uuid/fs/trash/restore",
+            post(fs_trash_restore),
+        )
+        .route(
+            "/api/admin/nodes/:uuid/fs/trash/empty",
+            post(fs_trash_empty),
+        )
         .route(
             "/api/admin/nodes/:uuid/fs/trash/delete",
             post(fs_trash_delete),

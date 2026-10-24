@@ -1,15 +1,21 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::{IntoResponse, Sse, sse::{Event, KeepAlive}};
-use futures_util::{StreamExt, stream};
+use axum::response::{
+    sse::{Event, KeepAlive},
+    IntoResponse, Sse,
+};
+use futures_util::{stream, StreamExt};
 use sakuio_board::BoardStateStore;
 use serde_json::json;
 
-use crate::AppState;
 use crate::web::rpc::data::{load_public_clients, parse_basic, v2_report_from_snapshot};
+use crate::AppState;
 
 /// GET `/api/clients` — realtime WebSocket (`get` / `get <uuid>`).
-pub async fn clients_websocket(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+pub async fn clients_websocket(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     ws.on_upgrade(move |socket| clients_ws_loop(state, socket))
 }
 
@@ -39,7 +45,11 @@ async fn clients_ws_loop(state: AppState, mut socket: WebSocket) {
             Ok(p) => p,
             Err(_) => {
                 let err = json!({ "status": "error", "error": "Internal error" });
-                if socket.send(Message::Text(err.to_string().into())).await.is_err() {
+                if socket
+                    .send(Message::Text(err.to_string().into()))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 continue;
@@ -122,7 +132,6 @@ pub(crate) async fn build_clients_ws_payload(
         }
     }))
 }
-
 
 /// GET `/api/clients/sse` — realtime SSE stream using the same payload as
 /// the compatibility WebSocket. Existing APIs are unchanged.

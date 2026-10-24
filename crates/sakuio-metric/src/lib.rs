@@ -23,6 +23,8 @@ pub enum MetricError {
     Sqlx(#[from] sqlx::Error),
     #[error("{0}")]
     Message(String),
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 /// Errors surfaced while connecting the monitoring database.

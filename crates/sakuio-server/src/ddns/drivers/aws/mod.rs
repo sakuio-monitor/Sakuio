@@ -14,16 +14,23 @@ const API_VERSION: &str = "2013-04-01";
 
 struct AwsDriver;
 
-fn signature(secret: &str, date: &str, method: &str, uri: &str, query: &str, payload: &str) -> String {
+fn signature(
+    secret: &str,
+    date: &str,
+    method: &str,
+    uri: &str,
+    query: &str,
+    payload: &str,
+) -> String {
     let region = "us-east-1";
     let service = "route53";
     let date_only = &date[..8];
     let payload_hash = hex::encode(Sha256::digest(payload.as_bytes()));
-    let canonical_headers = format!("host:{HOST}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{date}\n");
+    let canonical_headers =
+        format!("host:{HOST}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{date}\n");
     let signed_headers = "host;x-amz-content-sha256;x-amz-date";
-    let canonical = format!(
-        "{method}\n{uri}\n{query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-    );
+    let canonical =
+        format!("{method}\n{uri}\n{query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
     let scope = format!("{date_only}/{region}/{service}/aws4_request");
     let string_to_sign = format!(
         "AWS4-HMAC-SHA256\n{date}\n{scope}\n{}",
@@ -46,7 +53,13 @@ fn signature(secret: &str, date: &str, method: &str, uri: &str, query: &str, pay
     hex::encode(mac.finalize().into_bytes())
 }
 
-async fn call(config: &Value, method: &str, uri: &str, query: &str, payload: String) -> Result<reqwest::Response, String> {
+async fn call(
+    config: &Value,
+    method: &str,
+    uri: &str,
+    query: &str,
+    payload: String,
+) -> Result<reqwest::Response, String> {
     let access_key = common::required(config, "access_key_id", "AccessKey ID")?;
     let secret = common::required(config, "secret_access_key", "SecretAccessKey")?;
     let client = common::client()?;
@@ -62,7 +75,11 @@ async fn call(config: &Value, method: &str, uri: &str, query: &str, payload: Str
     } else {
         format!("https://{HOST}{uri}?{query}")
     };
-    let request = if method == "GET" { client.get(url) } else { client.post(url) };
+    let request = if method == "GET" {
+        client.get(url)
+    } else {
+        client.post(url)
+    };
     request
         .header("Authorization", authorization)
         .header("X-Amz-Date", date)
@@ -77,24 +94,57 @@ async fn call(config: &Value, method: &str, uri: &str, query: &str, payload: Str
 fn find_zone(xml: &str, zone: &str) -> Option<String> {
     let needle = format!("<Name>{zone}.</Name>");
     xml.split("<HostedZone>").skip(1).find_map(|chunk| {
-        if !chunk.contains(&needle) { return None; }
+        if !chunk.contains(&needle) {
+            return None;
+        }
         let start = chunk.find("<Id>")? + 4;
         let end = chunk[start..].find("</Id>")?;
-        Some(chunk[start..start + end].trim_start_matches("/hostedzone/").to_string())
+        Some(
+            chunk[start..start + end]
+                .trim_start_matches("/hostedzone/")
+                .to_string(),
+        )
     })
 }
 
 #[async_trait]
 impl DdnsDriver for AwsDriver {
-    fn id(&self) -> &'static str { "aws" }
-    fn name(&self) -> &'static str { "AWS Route 53" }
-    fn description(&self) -> &'static str { "AWS AccessKey / SecretKey，自动维护 Route 53 A/AAAA 记录" }
+    fn id(&self) -> &'static str {
+        "aws"
+    }
+    fn name(&self) -> &'static str {
+        "AWS Route 53"
+    }
+    fn description(&self) -> &'static str {
+        "AWS AccessKey / SecretKey，自动维护 Route 53 A/AAAA 记录"
+    }
 
     fn fields(&self) -> Vec<DriverField> {
         vec![
-            DriverField { key: "access_key_id", label: "AccessKey ID", kind: "text", required: true, placeholder: "AWS Access Key ID", options: None },
-            DriverField { key: "secret_access_key", label: "Secret Access Key", kind: "password", required: true, placeholder: "AWS Secret Access Key", options: None },
-            DriverField { key: "hosted_zone_id", label: "Hosted Zone ID", kind: "text", required: false, placeholder: "可选，留空自动查找", options: None },
+            DriverField {
+                key: "access_key_id",
+                label: "AccessKey ID",
+                kind: "text",
+                required: true,
+                placeholder: "AWS Access Key ID",
+                options: None,
+            },
+            DriverField {
+                key: "secret_access_key",
+                label: "Secret Access Key",
+                kind: "password",
+                required: true,
+                placeholder: "AWS Secret Access Key",
+                options: None,
+            },
+            DriverField {
+                key: "hosted_zone_id",
+                label: "Hosted Zone ID",
+                kind: "text",
+                required: false,
+                placeholder: "可选，留空自动查找",
+                options: None,
+            },
         ]
     }
 
@@ -114,7 +164,14 @@ impl DdnsDriver for AwsDriver {
         let record_type = request.record_type.to_ascii_uppercase();
         let mut hosted = request.zone_id.clone().filter(|value| !value.is_empty());
         if hosted.is_none() {
-            let response = call(config, "GET", &format!("/{API_VERSION}/hostedzone"), "", String::new()).await?;
+            let response = call(
+                config,
+                "GET",
+                &format!("/{API_VERSION}/hostedzone"),
+                "",
+                String::new(),
+            )
+            .await?;
             let xml = response.text().await.map_err(|error| error.to_string())?;
             hosted = find_zone(&xml, zone);
         }
@@ -124,11 +181,21 @@ impl DdnsDriver for AwsDriver {
             ttl = request.ttl.max(60),
             value = request.content
         );
-        let response = call(config, "POST", &format!("/{API_VERSION}/hostedzone/{zone_id}/rrset/"), "", payload).await?;
+        let response = call(
+            config,
+            "POST",
+            &format!("/{API_VERSION}/hostedzone/{zone_id}/rrset/"),
+            "",
+            payload,
+        )
+        .await?;
         if !response.status().is_success() {
             return Err(common::error_message(response).await);
         }
-        Ok(DdnsResult { zone_id, record_id: String::new() })
+        Ok(DdnsResult {
+            zone_id,
+            record_id: String::new(),
+        })
     }
 }
 

@@ -126,13 +126,14 @@ fi
 # GitHub-prefix form the proxy expects. A full prefix is used as-is.
 github_base() {
   local proxy="${1%/}"
-  if [[ -z "$proxy" || "$proxy" == "https://github.com" ]]; then
-    printf '%s' "https://github.com"
-  elif [[ "$proxy" == *"/https://github.com" || "$proxy" == *"/http://github.com" ]]; then
-    printf '%s' "$proxy"
-  else
-    printf '%s' "$proxy/https://github.com"
-  fi
+  case "$proxy" in
+    "") printf '%s' "https://github.com" ;;
+    *"/https://github.com"|*"/http://github.com") printf '%s' "$proxy" ;;
+    https://*) printf '%s' "$proxy/https://github.com" ;;
+    http://*) printf '%s' "https://${proxy#http://}/https://github.com" ;;
+    httpss://*) printf '%s' "https://${proxy#httpss://}/https://github.com" ;;
+    *) printf '%s' "https://$proxy/https://github.com" ;;
+  esac
 }
 
 GITHUB_BASE="$(github_base "$GITHUB_PROXY")"
@@ -338,13 +339,14 @@ BIN="\$INSTALL_DIR/sakuio-server"
 cd "\$INSTALL_DIR" || exit 1
 github_base() {
   local proxy="\${1%/}"
-  if [[ -z "\$proxy" || "\$proxy" == "https://github.com" ]]; then
-    printf '%s' "https://github.com"
-  elif [[ "\$proxy" == *"/https://github.com" || "\$proxy" == *"/http://github.com" ]]; then
-    printf '%s' "\$proxy"
-  else
-    printf '%s' "\$proxy/https://github.com"
-  fi
+  case "\$proxy" in
+    "") printf '%s' "https://github.com" ;;
+    *"/https://github.com"|*"/http://github.com") printf '%s' "\$proxy" ;;
+    https://*) printf '%s' "\$proxy/https://github.com" ;;
+    http://*) printf '%s' "https://\${proxy#http://}/https://github.com" ;;
+    httpss://*) printf '%s' "https://\${proxy#httpss://}/https://github.com" ;;
+    *) printf '%s' "https://\$proxy/https://github.com" ;;
+  esac
 }
 IS_DARWIN=0
 [[ "\$(uname -s)" == "Darwin" ]] && IS_DARWIN=1
@@ -452,6 +454,10 @@ do_update() {
   local base
   base="\$(github_base "\${proxy:-}")"
   url="\${base}/sakuio-monitor/Sakuio/releases/download/v\${version}/\${asset}"
+  case "\$url" in
+    https://*|http://*) ;;
+    *) echo "无效下载地址: \$url" >&2; return 1 ;;
+  esac
   tmp="\$(mktemp)"
   echo "==> 下载 \$url"
   if command -v curl >/dev/null 2>&1; then

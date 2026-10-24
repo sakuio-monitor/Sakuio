@@ -1,4 +1,4 @@
-use crate::registry::{NotifyError, NotifyResult, NotificationChannel};
+use crate::registry::{NotificationChannel, NotifyError, NotifyResult};
 use crate::types::{ChannelMeta, ConfigField, NotificationMessage};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -70,7 +70,9 @@ impl NotificationChannel for ServerChanChannel {
         let title = message.title.trim();
         let body = message.body.trim();
         if title.is_empty() && body.is_empty() {
-            return Err(NotifyError::InvalidConfig("title and body are empty".into()));
+            return Err(NotifyError::InvalidConfig(
+                "title and body are empty".into(),
+            ));
         }
 
         let mut payload = json!({
@@ -98,10 +100,7 @@ impl NotificationChannel for ServerChanChannel {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(NotifyError::Send(format!(
-                "HTTP {status}: {}",
-                text.trim()
-            )));
+            return Err(NotifyError::Send(format!("HTTP {status}: {}", text.trim())));
         }
         Ok(())
     }

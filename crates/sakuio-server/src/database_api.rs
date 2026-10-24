@@ -48,6 +48,7 @@ pub async fn get_database_info(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let store = state.metric.current_store().await;
     let metric_size = store.size_bytes().await.unwrap_or(0);
+    let shared = store.kind() == sakuio_metric::MetricKind::Merged;
     let main_size = main_db_size_bytes(&state).await;
 
     Ok(Json(serde_json::json!({
@@ -62,7 +63,8 @@ pub async fn get_database_info(
         "metrics": {
             "kind": store.kind().as_str(),
             "dsn": cfg.dsn,
-            "size_bytes": metric_size,
+            "size_bytes": if shared { 0 } else { metric_size },
+            "shared": shared,
             "table_prefix": cfg.table_prefix,
             "max_connections": cfg.max_connections,
             "min_idle_connections": cfg.min_idle_connections,
@@ -220,16 +222,14 @@ pub async fn update_database(
                 tasks.phase("verifying metrics");
                 let old_table = format!("{}buckets", old_store.prefix());
                 let new_table = format!("{}buckets", new_store.prefix());
-                let old_count: Result<i64, _> = sqlx::query_scalar(&format!(
-                    "SELECT COUNT(*) FROM {old_table}"
-                ))
-                .fetch_one(old_store.pool())
-                .await;
-                let new_count: Result<i64, _> = sqlx::query_scalar(&format!(
-                    "SELECT COUNT(*) FROM {new_table}"
-                ))
-                .fetch_one(new_store.pool())
-                .await;
+                let old_count: Result<i64, _> =
+                    sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {old_table}"))
+                        .fetch_one(old_store.pool())
+                        .await;
+                let new_count: Result<i64, _> =
+                    sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {new_table}"))
+                        .fetch_one(new_store.pool())
+                        .await;
                 match (old_count, new_count) {
                     (Ok(old), Ok(new)) if new >= old => {}
                     (Ok(old), Ok(new)) => {

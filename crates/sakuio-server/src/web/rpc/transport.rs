@@ -9,9 +9,7 @@ use serde_json::Value;
 use crate::AppState;
 
 use super::dispatch::dispatch;
-use super::types::{
-    error_response, parse_request_body, success_response, JsonRpcRequest,
-};
+use super::types::{error_response, parse_request_body, success_response, JsonRpcRequest};
 
 /// GET `/api/rpc2` — WebSocket JSON-RPC.
 pub async fn rpc2_get(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -38,7 +36,9 @@ async fn rpc2_websocket_loop(state: AppState, mut socket: WebSocket) {
         let id = req.id.clone();
         if let Some((code, msg)) = req.validate() {
             let _ = socket
-                .send(Message::Text(error_response(id, code, msg).to_string().into()))
+                .send(Message::Text(
+                    error_response(id, code, msg).to_string().into(),
+                ))
                 .await;
             continue;
         }

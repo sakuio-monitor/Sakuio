@@ -131,8 +131,12 @@ pub struct UpdateRuleBody {
     pub template_body: String,
 }
 
-fn default_duration() -> i64 { 300 }
-fn default_enabled() -> bool { true }
+fn default_duration() -> i64 {
+    300
+}
+fn default_enabled() -> bool {
+    true
+}
 
 fn valid_event(event: &str) -> bool {
     matches!(
@@ -339,7 +343,12 @@ pub async fn test_instance(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
     let mut config = row.config;
-    if let Some(to) = body.to_email.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(to) = body
+        .to_email
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         if let Some(obj) = config.as_object_mut() {
             obj.insert("to_email".into(), json!(to));
         }
@@ -377,7 +386,11 @@ pub async fn set_instance_enabled(
         .set_instance_enabled(&id, body.enabled)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if ok { Ok(StatusCode::NO_CONTENT) } else { Err(StatusCode::NOT_FOUND) }
+    if ok {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
 }
 
 pub async fn set_rule_enabled(
@@ -390,7 +403,11 @@ pub async fn set_rule_enabled(
         .set_rule_enabled(&id, body.enabled)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if ok { Ok(StatusCode::NO_CONTENT) } else { Err(StatusCode::NOT_FOUND) }
+    if ok {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
 }
 
 // ---------------------------------------------------------------- rules
@@ -595,7 +612,8 @@ pub async fn dispatch_event(
     };
     let now = Utc::now().to_rfc3339();
     for rule in rules {
-        if !rule.enabled || rule.event_type != event_type || !rule_matches_client(&rule, node_uuid) {
+        if !rule.enabled || rule.event_type != event_type || !rule_matches_client(&rule, node_uuid)
+        {
             continue;
         }
         let mut vars: HashMap<String, String> = extra_vars
@@ -663,19 +681,23 @@ struct WatcherState {
 fn metric_event_value(event: &str, snap: &sakuio_board::RuntimeSnapshot) -> Option<f64> {
     match event {
         EVENT_CPU_HIGH => snap.cpu_usage,
-        EVENT_MEMORY_HIGH => snap.mem_used.zip(snap.mem_total).and_then(|(used, total)| {
-            (total > 0).then_some(used as f64 / total as f64 * 100.0)
-        }),
-        EVENT_DISK_HIGH => snap.disk_used.zip(snap.disk_total).and_then(|(used, total)| {
-            (total > 0).then_some(used as f64 / total as f64 * 100.0)
-        }),
-        EVENT_SWAP_HIGH => snap.swap_used.zip(snap.swap_total).and_then(|(used, total)| {
-            (total > 0).then_some(used as f64 / total as f64 * 100.0)
-        }),
+        EVENT_MEMORY_HIGH => snap
+            .mem_used
+            .zip(snap.mem_total)
+            .and_then(|(used, total)| (total > 0).then_some(used as f64 / total as f64 * 100.0)),
+        EVENT_DISK_HIGH => snap
+            .disk_used
+            .zip(snap.disk_total)
+            .and_then(|(used, total)| (total > 0).then_some(used as f64 / total as f64 * 100.0)),
+        EVENT_SWAP_HIGH => snap
+            .swap_used
+            .zip(snap.swap_total)
+            .and_then(|(used, total)| (total > 0).then_some(used as f64 / total as f64 * 100.0)),
         EVENT_LOAD_HIGH => snap.load1,
-        EVENT_BANDWIDTH_HIGH => snap.net_up.zip(snap.net_down).map(|(up, down)| {
-            (up.saturating_add(down) as f64 * 8.0) / 1_000_000.0
-        }),
+        EVENT_BANDWIDTH_HIGH => snap
+            .net_up
+            .zip(snap.net_down)
+            .map(|(up, down)| (up.saturating_add(down) as f64 * 8.0) / 1_000_000.0),
         EVENT_GPU_HIGH => snap.gpu_usage.map(f64::from),
         EVENT_PROCESS_HIGH => snap.process.map(f64::from),
         _ => None,
@@ -809,7 +831,13 @@ async fn tick_watcher(state: &AppState, watcher: &Mutex<WatcherState>) -> Result
         .collect();
     if !metric_rules.is_empty() {
         for row in &clients {
-            let Some(snap) = state.board.get_latest_snapshot(&row.uuid).await.ok().flatten() else {
+            let Some(snap) = state
+                .board
+                .get_latest_snapshot(&row.uuid)
+                .await
+                .ok()
+                .flatten()
+            else {
                 continue;
             };
             for rule in &metric_rules {
@@ -827,7 +855,9 @@ async fn tick_watcher(state: &AppState, watcher: &Mutex<WatcherState>) -> Result
                 }
                 let since = *guard.metric_since.entry(key.clone()).or_insert(now);
                 let duration = rule.duration_secs.max(0);
-                if (now - since).num_seconds() < duration || !guard.metric_notified.insert(key.clone()) {
+                if (now - since).num_seconds() < duration
+                    || !guard.metric_notified.insert(key.clone())
+                {
                     continue;
                 }
                 dispatch_event(
@@ -950,43 +980,41 @@ async fn tick_watcher(state: &AppState, watcher: &Mutex<WatcherState>) -> Result
     if offline_rules.is_empty() {
         guard.offline.clear();
     } else {
-    for row in &clients {
-        if row.online {
-            guard.offline.remove(&row.uuid);
-            continue;
-        }
-        let episode = guard.offline.entry(row.uuid.clone()).or_insert_with(|| {
-            OfflineEpisode {
-                offline_since: now,
-                notified_grace: -1,
-            }
-        });
-        let elapsed = (now - episode.offline_since).num_seconds();
-        for rule in &offline_rules {
-            if !rule_matches_client(rule, &row.uuid) {
+        for row in &clients {
+            if row.online {
+                guard.offline.remove(&row.uuid);
                 continue;
             }
-            let grace = rule.threshold.max(0);
-            if elapsed < grace || episode.notified_grace >= grace {
-                continue;
+            let episode = guard
+                .offline
+                .entry(row.uuid.clone())
+                .or_insert_with(|| OfflineEpisode {
+                    offline_since: now,
+                    notified_grace: -1,
+                });
+            let elapsed = (now - episode.offline_since).num_seconds();
+            for rule in &offline_rules {
+                if !rule_matches_client(rule, &row.uuid) {
+                    continue;
+                }
+                let grace = rule.threshold.max(0);
+                if elapsed < grace || episode.notified_grace >= grace {
+                    continue;
+                }
+                episode.notified_grace = grace;
+                dispatch_event(
+                    state,
+                    EVENT_OFFLINE,
+                    &row.uuid,
+                    &row.name,
+                    &[
+                        ("grace_period", grace.to_string()),
+                        ("last_online", row.last_seen_at.clone().unwrap_or_default()),
+                    ],
+                )
+                .await;
             }
-            episode.notified_grace = grace;
-            dispatch_event(
-                state,
-                EVENT_OFFLINE,
-                &row.uuid,
-                &row.name,
-                &[
-                    ("grace_period", grace.to_string()),
-                    (
-                        "last_online",
-                        row.last_seen_at.clone().unwrap_or_default(),
-                    ),
-                ],
-            )
-            .await;
         }
-    }
     }
     Ok(())
 }

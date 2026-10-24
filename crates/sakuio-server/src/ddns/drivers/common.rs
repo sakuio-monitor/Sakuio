@@ -60,7 +60,9 @@ pub async fn error_message(response: Response) -> String {
         .filter(|message| !message.is_empty());
     match message {
         Some(message) => format!("DNS API 错误（{status}）：{message}"),
-        None => format!("DNS API 错误（{status}）：{}", body.chars().take(240).collect::<String>()),
+        None => format!(
+            "DNS API 错误（{status}）：{}",
+            body.chars().take(240).collect::<String>()
+        ),
     }
 }
-

@@ -40,14 +40,19 @@ pub async fn latest_supported(max_version: &str) -> Result<Option<String>, Strin
         .build()
         .map_err(|error| format!("创建 GitHub 客户端失败：{error}"))?;
     let response = client
-        .get(format!("https://api.github.com/repos/{REPO}/releases?per_page=100"))
+        .get(format!(
+            "https://api.github.com/repos/{REPO}/releases?per_page=100"
+        ))
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "sakuio-server")
         .send()
         .await
         .map_err(|error| format!("查询 Agent Release 失败：{error}"))?;
     if !response.status().is_success() {
-        return Err(format!("查询 Agent Release 失败：HTTP {}", response.status()));
+        return Err(format!(
+            "查询 Agent Release 失败：HTTP {}",
+            response.status()
+        ));
     }
     let releases: Vec<serde_json::Value> = response
         .json()
@@ -56,7 +61,10 @@ pub async fn latest_supported(max_version: &str) -> Result<Option<String>, Strin
     let mut best: Option<((u64, u64, u64), String)> = None;
     for release in releases {
         if release.get("draft").and_then(serde_json::Value::as_bool) == Some(true)
-            || release.get("prerelease").and_then(serde_json::Value::as_bool) == Some(true)
+            || release
+                .get("prerelease")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
         {
             continue;
         }

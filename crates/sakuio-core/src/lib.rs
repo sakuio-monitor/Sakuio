@@ -9,8 +9,8 @@ mod remote;
 mod session_id;
 
 pub use command_bus::AgentCommandBus;
-pub use ping_dispatch::flush_pending_ping_commands;
 pub use ingest::{snapshot_from_sample, IngestPipeline};
 pub use link_handler::LinkSessionHandler;
+pub use ping_dispatch::flush_pending_ping_commands;
 pub use remote::{parse_file_result, RemoteError, RemoteHub};
 pub use session_id::new_session_id;

@@ -81,7 +81,11 @@ impl RemoteHub {
             return Err(RemoteError::Offline);
         }
         let _ = board
-            .enqueue_command(node_uuid, METHOD_REMOTE_FILE, serde_json::to_value(&cmd).unwrap())
+            .enqueue_command(
+                node_uuid,
+                METHOD_REMOTE_FILE,
+                serde_json::to_value(&cmd).unwrap(),
+            )
             .await;
 
         match tokio::time::timeout(DEFAULT_FILE_TIMEOUT, rx).await {
@@ -90,7 +94,9 @@ impl RemoteHub {
                     Ok(result.result)
                 } else {
                     Err(RemoteError::Agent(
-                        result.error.unwrap_or_else(|| "file operation failed".into()),
+                        result
+                            .error
+                            .unwrap_or_else(|| "file operation failed".into()),
                     ))
                 }
             }
@@ -117,9 +123,7 @@ impl RemoteHub {
             }),
         );
         if !bus.push(node_uuid, msg).await {
-            let _ = board
-                .enqueue_command(node_uuid, method, payload)
-                .await;
+            let _ = board.enqueue_command(node_uuid, method, payload).await;
             return Err(RemoteError::Offline);
         }
         Ok(())
@@ -133,14 +137,7 @@ impl RemoteHub {
         spec: RemoteStreamRead,
     ) -> Result<(), RemoteError> {
         let payload = serde_json::to_value(&spec).map_err(|_| RemoteError::Internal)?;
-        Self::push_control_cmd(
-            board,
-            bus,
-            node_uuid,
-            METHOD_REMOTE_STREAM_READ,
-            payload,
-        )
-        .await
+        Self::push_control_cmd(board, bus, node_uuid, METHOD_REMOTE_STREAM_READ, payload).await
     }
 
     pub async fn push_stream_write(
@@ -151,14 +148,7 @@ impl RemoteHub {
         spec: RemoteStreamWrite,
     ) -> Result<(), RemoteError> {
         let payload = serde_json::to_value(&spec).map_err(|_| RemoteError::Internal)?;
-        Self::push_control_cmd(
-            board,
-            bus,
-            node_uuid,
-            METHOD_REMOTE_STREAM_WRITE,
-            payload,
-        )
-        .await
+        Self::push_control_cmd(board, bus, node_uuid, METHOD_REMOTE_STREAM_WRITE, payload).await
     }
 
     pub async fn push_shell(

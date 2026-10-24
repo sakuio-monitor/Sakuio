@@ -445,7 +445,9 @@ async fn database_metrics(state: &AppState, sampler: &mut Sampler) -> DatabaseMe
     let connections = state.db.inner().size() as u64;
     let idle_connections = state.db.inner().num_idle() as u64;
     let active_connections = connections.saturating_sub(idle_connections);
-    let peak_connections = DB_ACTIVE_PEAK.swap(0, Ordering::Relaxed).max(active_connections);
+    let peak_connections = DB_ACTIVE_PEAK
+        .swap(0, Ordering::Relaxed)
+        .max(active_connections);
     let max_connections = state.db.max_connections() as u64;
     let writes_total = sakuio_db::DB_WRITES.load(Ordering::Relaxed);
     let queries_total = sakuio_db::DB_QUERIES.load(Ordering::Relaxed);
@@ -546,32 +548,39 @@ async fn database_table_sizes(
     let mut clients = 0u64;
     let mut metrics = 0u64;
     let mut other = 0u64;
-    let mut tables: Vec<TableSize> = Vec::new();
+    let mut logical: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     for row in rows {
         let Ok(name) = row.try_get::<String, _>("name") else {
             continue;
         };
         let size = row.try_get::<i64, _>("size").unwrap_or(0).max(0) as u64;
-        if size > 0 {
-            tables.push(TableSize {
-                name: name.clone(),
-                bytes: size,
-            });
-        }
         let lower = name.to_ascii_lowercase();
-        if lower == "audit_logs" || lower.starts_with("idx_audit") {
+        // TimescaleDB physically stores rows in internal chunks. Present all
+        // backends with the same logical table name as SQLite/MySQL.
+        let logical_name = if lower.contains("_hyper_") || lower.contains("_chunk") {
+            "metric_buckets".to_string()
+        } else {
+            name.clone()
+        };
+        *logical.entry(logical_name.clone()).or_default() += size;
+        if logical_name == "audit_logs" || lower.starts_with("idx_audit") {
             audit = audit.saturating_add(size);
-        } else if lower == "clients"
-            || lower.starts_with("client")
+        } else if logical_name == "clients"
+            || logical_name.starts_with("client")
             || lower.starts_with("idx_client")
         {
             clients = clients.saturating_add(size);
-        } else if lower.starts_with("metric") || lower.starts_with("idx_metric") {
+        } else if logical_name.starts_with("metric") || lower.starts_with("idx_metric") {
             metrics = metrics.saturating_add(size);
         } else {
             other = other.saturating_add(size);
         }
     }
+    let mut tables: Vec<TableSize> = logical
+        .into_iter()
+        .filter(|(_, bytes)| *bytes > 0)
+        .map(|(name, bytes)| TableSize { name, bytes })
+        .collect();
     let known = audit
         .saturating_add(clients)
         .saturating_add(metrics)

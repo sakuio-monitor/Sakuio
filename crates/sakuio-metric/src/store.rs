@@ -12,7 +12,7 @@ const INSERT_CHUNK: usize = 200;
 
 /// One aggregated metric bucket row.
 /// 聚合指标桶行。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BucketRow {
     pub node_uuid: String,
     pub metric_key: String,
@@ -75,13 +75,15 @@ impl MetricStore {
             sakuio_db::ensure_metric_schema(main_pool, &prefix)
                 .await
                 .map_err(|e| crate::PoolError::Connect(e.to_string()))?;
-            return Ok(Self {
+            let store = Self {
                 pool: main_pool.clone(),
                 query_pool: None,
                 prefix,
                 kind: MetricKind::Merged,
                 dialect: main_pool.kind(),
-            });
+            };
+            store.ensure_retention_defaults().await?;
+            return Ok(store);
         }
         let dialect = DbKind::detect(&cfg.dsn);
         let kind = match dialect {
@@ -114,13 +116,15 @@ impl MetricStore {
         if query_pool.is_none() {
             tracing::warn!("metric query pool unavailable; queries share the writer pool");
         }
-        Ok(Self {
+        let store = Self {
             pool,
             query_pool,
             prefix,
             kind,
             dialect,
-        })
+        };
+        store.ensure_retention_defaults().await?;
+        Ok(store)
     }
 
     pub fn kind(&self) -> MetricKind {
@@ -231,8 +235,15 @@ impl MetricStore {
         }
         const CHUNK: usize = 400;
         for chunk in nodes.chunks(CHUNK) {
-            let placeholders = std::iter::repeat("?").take(chunk.len()).collect::<Vec<_>>().join(", ");
-            let metric_filter = if metric_key.is_some() { " AND metric_key = ?" } else { "" };
+            let placeholders = std::iter::repeat("?")
+                .take(chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let metric_filter = if metric_key.is_some() {
+                " AND metric_key = ?"
+            } else {
+                ""
+            };
             let sql = format!(
                 "SELECT node_uuid, metric_key, bucket_seconds, bucket_start_ms, \
                  avg_val, min_val, max_val, sample_count FROM {} \
@@ -241,7 +252,8 @@ impl MetricStore {
                  ORDER BY node_uuid, bucket_start_ms LIMIT ?",
                 self.table("buckets"),
             );
-            let mut query = sqlx::query_as::<_, (String, String, i64, i64, f64, f64, f64, i64)>(&sql);
+            let mut query =
+                sqlx::query_as::<_, (String, String, i64, i64, f64, f64, f64, i64)>(&sql);
             for node in chunk {
                 query = query.bind(node.clone());
             }
@@ -250,12 +262,35 @@ impl MetricStore {
                 query = query.bind(key.to_string());
             }
             let rows = query.bind(limit).fetch_all(self.read_pool()).await?;
-            for (node_uuid, metric_key, bucket_seconds, bucket_start_ms, avg_val, min_val, max_val, sample_count) in rows {
-                grouped.entry(node_uuid.clone()).or_default().push(BucketRow {
-                    node_uuid, metric_key, bucket_seconds, bucket_start_ms,
-                    avg_val, min_val, max_val, sample_count,
-                    sum_sq: 0.0, variance: 0.0, p50_val: 0.0, p95_val: 0.0, p99_val: 0.0,
-                });
+            for (
+                node_uuid,
+                metric_key,
+                bucket_seconds,
+                bucket_start_ms,
+                avg_val,
+                min_val,
+                max_val,
+                sample_count,
+            ) in rows
+            {
+                grouped
+                    .entry(node_uuid.clone())
+                    .or_default()
+                    .push(BucketRow {
+                        node_uuid,
+                        metric_key,
+                        bucket_seconds,
+                        bucket_start_ms,
+                        avg_val,
+                        min_val,
+                        max_val,
+                        sample_count,
+                        sum_sq: 0.0,
+                        variance: 0.0,
+                        p50_val: 0.0,
+                        p95_val: 0.0,
+                        p99_val: 0.0,
+                    });
             }
         }
         Ok(grouped)
@@ -291,7 +326,16 @@ impl MetricStore {
         Ok(rows
             .into_iter()
             .map(
-                |(node_uuid, metric_key, bucket_seconds, bucket_start_ms, avg_val, min_val, max_val, sample_count)| {
+                |(
+                    node_uuid,
+                    metric_key,
+                    bucket_seconds,
+                    bucket_start_ms,
+                    avg_val,
+                    min_val,
+                    max_val,
+                    sample_count,
+                )| {
                     BucketRow {
                         node_uuid,
                         metric_key,
@@ -518,6 +562,126 @@ impl MetricStore {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Seeds the retention table so every metric has an explicit persisted
+    /// default instead of only being shown as 90 by the API fallback.
+    async fn ensure_retention_defaults(&self) -> Result<(), crate::PoolError> {
+        let existing = self
+            .retention_days()
+            .await
+            .map_err(|e| crate::PoolError::Connect(e.to_string()))?
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect::<std::collections::HashSet<_>>();
+        for def in crate::keys::METRIC_KEYS {
+            if !existing.contains(def.key) {
+                self.set_retention_days(def.key, 90)
+                    .await
+                    .map_err(|e| crate::PoolError::Connect(e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reclaims physical space left by retention deletes. PostgreSQL and
+    /// SQLite need VACUUM; MySQL needs OPTIMIZE TABLE. This runs in the metric
+    /// cleanup task, never on the request path.
+    pub async fn reclaim_space(&self) -> Result<(), MetricError> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static FIRST_RECLAIM: AtomicBool = AtomicBool::new(true);
+        let first = FIRST_RECLAIM.swap(false, Ordering::Relaxed);
+        let table = self.table("buckets");
+        match self.dialect {
+            DbKind::Sqlite => {
+                // VACUUM cannot run concurrently; one pass per process is
+                // enough to return space after a large cleanup.
+                if first {
+                    sqlx::query("VACUUM").execute(&self.pool).await?;
+                }
+            }
+            DbKind::MySql => {
+                if first {
+                    sqlx::query(&format!("OPTIMIZE TABLE {table}"))
+                        .execute(&self.pool)
+                        .await?;
+                }
+            }
+            DbKind::Postgres => {
+                // First pass after deploy compacts the table; later passes are
+                // cheap ANALYZE because FULL takes an exclusive lock.
+                let sql = if first {
+                    format!("VACUUM (FULL, ANALYZE) {table}")
+                } else {
+                    format!("VACUUM (ANALYZE) {table}")
+                };
+                sqlx::query(&sql).execute(&self.pool).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Persists the open-window aggregator snapshot, one JSON row per node.
+    pub async fn save_checkpoints(&self, rows: &[BucketRow]) -> Result<(), MetricError> {
+        use std::collections::HashMap;
+        let mut by_node: HashMap<&str, Vec<&BucketRow>> = HashMap::new();
+        for row in rows {
+            by_node.entry(row.node_uuid.as_str()).or_default().push(row);
+        }
+        if by_node.is_empty() {
+            return Ok(());
+        }
+        let table = self.table("checkpoints");
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut tx = self.pool.begin().await?;
+        for (node, node_rows) in by_node {
+            let payload = serde_json::to_string(&node_rows).map_err(MetricError::Json)?;
+            let sql = match self.dialect {
+                DbKind::MySql => format!(
+                    "INSERT INTO {table} (node_uuid, checkpoint_ms, payload) VALUES (?, ?, ?) \
+                     ON DUPLICATE KEY UPDATE checkpoint_ms = VALUES(checkpoint_ms), payload = VALUES(payload)"
+                ),
+                _ => format!(
+                    "INSERT INTO {table} (node_uuid, checkpoint_ms, payload) VALUES (?, ?, ?) \
+                     ON CONFLICT (node_uuid) DO UPDATE SET \
+                     checkpoint_ms = excluded.checkpoint_ms, payload = excluded.payload"
+                ),
+            };
+            sqlx::query(&sql)
+                .bind(node.to_string())
+                .bind(now)
+                .bind(payload)
+                .execute(&mut tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Removes checkpoints after a graceful flush/shutdown.
+    pub async fn clear_checkpoints(&self) -> Result<(), MetricError> {
+        sqlx::query(&format!("DELETE FROM {}", self.table("checkpoints")))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Loads all open-window checkpoints.
+    pub async fn load_checkpoints(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<BucketRow>>, MetricError> {
+        let table = self.table("checkpoints");
+        let rows: Vec<(String, String)> =
+            sqlx::query_as(&format!("SELECT node_uuid, payload FROM {table}"))
+                .fetch_all(self.read_pool())
+                .await?;
+        let mut result = std::collections::HashMap::new();
+        for (node, payload) in rows {
+            let parsed: Vec<BucketRow> =
+                serde_json::from_str(&payload).map_err(MetricError::Json)?;
+            result.insert(node, parsed);
+        }
+        Ok(result)
     }
 
     /// Returns the logical size of the monitoring database in bytes.

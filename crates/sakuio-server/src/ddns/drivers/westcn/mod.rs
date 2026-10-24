@@ -35,21 +35,44 @@ async fn decode(response: reqwest::Response) -> Result<Value, String> {
     let bytes = response.bytes().await.map_err(|error| error.to_string())?;
     let (text, _, _) = encoding_rs::GBK.decode(&bytes);
     if !status.is_success() {
-        return Err(format!("西部数码 API 错误（{status}）：{}", text.chars().take(240).collect::<String>()));
+        return Err(format!(
+            "西部数码 API 错误（{status}）：{}",
+            text.chars().take(240).collect::<String>()
+        ));
     }
     serde_json::from_str(&text).map_err(|error| format!("解析西部数码响应失败：{error}"))
 }
 
 #[async_trait]
 impl DdnsDriver for WestcnDriver {
-    fn id(&self) -> &'static str { "westcn" }
-    fn name(&self) -> &'static str { "西部数码" }
-    fn description(&self) -> &'static str { "西部数码账号密码，自动维护 A/AAAA 记录" }
+    fn id(&self) -> &'static str {
+        "westcn"
+    }
+    fn name(&self) -> &'static str {
+        "西部数码"
+    }
+    fn description(&self) -> &'static str {
+        "西部数码账号密码，自动维护 A/AAAA 记录"
+    }
 
     fn fields(&self) -> Vec<DriverField> {
         vec![
-            DriverField { key: "username", label: "账号", kind: "text", required: true, placeholder: "西部数码账号", options: None },
-            DriverField { key: "password", label: "密码", kind: "password", required: true, placeholder: "西部数码密码", options: None },
+            DriverField {
+                key: "username",
+                label: "账号",
+                kind: "text",
+                required: true,
+                placeholder: "西部数码账号",
+                options: None,
+            },
+            DriverField {
+                key: "password",
+                label: "密码",
+                kind: "password",
+                required: true,
+                placeholder: "西部数码密码",
+                options: None,
+            },
         ]
     }
 
@@ -65,11 +88,19 @@ impl DdnsDriver for WestcnDriver {
         let client = common::client()?;
         let zone = request.zone_name.trim().trim_end_matches('.');
         let host = request.record_name.trim();
-        let host = if host.is_empty() || host == "@" { "@" } else { host };
+        let host = if host.is_empty() || host == "@" {
+            "@"
+        } else {
+            host
+        };
         if let Some(id) = request.record_id.as_deref().filter(|id| !id.is_empty()) {
             let mut form = vec![("domain".into(), zone.into()), ("id".into(), id.into())];
             auth(&mut form, &username, &password);
-            let _ = client.post(format!("{API}?act=deldnsrecord")).form(&form).send().await;
+            let _ = client
+                .post(format!("{API}?act=deldnsrecord"))
+                .form(&form)
+                .send()
+                .await;
         }
         let mut form = vec![
             ("domain".into(), zone.into()),
@@ -87,14 +118,21 @@ impl DdnsDriver for WestcnDriver {
             .map_err(|error| format!("连接西部数码失败：{error}"))?;
         let value = decode(response).await?;
         if value.get("result").and_then(Value::as_i64) != Some(200) {
-            return Err(value.get("msg").and_then(Value::as_str).unwrap_or("西部数码添加解析失败").to_string());
+            return Err(value
+                .get("msg")
+                .and_then(Value::as_str)
+                .unwrap_or("西部数码添加解析失败")
+                .to_string());
         }
         let record_id = value
             .get("data")
             .and_then(|data| data.get("id"))
             .map(|id| id.to_string().trim_matches('"').to_string())
             .unwrap_or_default();
-        Ok(DdnsResult { zone_id: zone.to_string(), record_id })
+        Ok(DdnsResult {
+            zone_id: zone.to_string(),
+            record_id,
+        })
     }
 }
 

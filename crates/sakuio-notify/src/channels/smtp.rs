@@ -1,10 +1,10 @@
-use crate::registry::{NotifyError, NotifyResult, NotificationChannel};
+use crate::registry::{NotificationChannel, NotifyError, NotifyResult};
 use crate::types::{ChannelMeta, ConfigField, NotificationMessage};
 use async_trait::async_trait;
-use lettre::message::header::ContentType;
-use lettre::transport::smtp::authentication::Credentials;
 use lettre::address::AddressError;
+use lettre::message::header::ContentType;
 use lettre::message::Mailbox;
+use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use serde::Deserialize;
 use serde_json::json;
@@ -51,13 +51,7 @@ impl SmtpChannel {
             name: "SMTP 邮件".into(),
             fields: vec![
                 field("smtp_host", "SMTP 服务器", "string", true, None),
-                field(
-                    "smtp_port",
-                    "端口",
-                    "number",
-                    true,
-                    Some(json!(465)),
-                ),
+                field("smtp_port", "端口", "number", true, Some(json!(465))),
                 field("smtp_username", "用户名", "string", false, None),
                 field("smtp_password", "密码", "password", false, None),
                 field("from_email", "发件邮箱", "string", true, None),
@@ -75,13 +69,7 @@ impl SmtpChannel {
                     false,
                     Some(json!(true)),
                 ),
-                field(
-                    "to_email",
-                    "默认收件邮箱",
-                    "string",
-                    false,
-                    Some(json!("")),
-                ),
+                field("to_email", "默认收件邮箱", "string", false, Some(json!(""))),
             ],
         }
     }

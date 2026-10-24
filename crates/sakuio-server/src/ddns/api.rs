@@ -154,7 +154,8 @@ async fn insert_record_row(
     .fetch_optional(pool)
     .await
     .map_err(|error| error.to_string())?;
-    id.filter(|id| *id > 0).ok_or_else(|| "创建 DDNS 记录失败：未返回记录 ID".to_string())
+    id.filter(|id| *id > 0)
+        .ok_or_else(|| "创建 DDNS 记录失败：未返回记录 ID".to_string())
 }
 
 fn fail(status: StatusCode, message: impl Into<String>) -> Response {
@@ -579,7 +580,8 @@ async fn record_create(
             }
             return fail(StatusCode::BAD_REQUEST, error);
         }
-        let id = match insert_record_row(&state.db, &body, &zone_name, &record_name, record_type).await
+        let id = match insert_record_row(&state.db, &body, &zone_name, &record_name, record_type)
+            .await
         {
             Ok(id) => id,
             Err(error) => {
@@ -928,7 +930,9 @@ mod tests {
     #[tokio::test]
     async fn inserts_record_and_returns_auto_id() {
         let (dsn, path) = temp_dsn();
-        let database = sakuio_db::AppDatabase::connect(&dsn, true).await.expect("database");
+        let database = sakuio_db::AppDatabase::connect(&dsn, true)
+            .await
+            .expect("database");
         sqlx::query(
             "INSERT INTO clients (uuid, name, token, online, ipv4, ipv6, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
         )

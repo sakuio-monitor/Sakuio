@@ -1,13 +1,13 @@
 use crate::AppState;
 use serde_json::{json, Value};
 
-use super::data::{
-    common_get_nodes_latest_status, common_get_nodes_map, guest_me, param_uuid,
-    public_nodes_list, public_settings, version_info,
-};
 use super::admin_ping::{
     admin_add_ping_task, admin_delete_ping_task, admin_edit_ping_task, admin_get_all_ping_tasks,
     admin_order_ping_task,
+};
+use super::data::{
+    common_get_nodes_latest_status, common_get_nodes_map, guest_me, param_uuid, public_nodes_list,
+    public_settings, version_info,
 };
 use super::ping::public_ping_tasks;
 use super::records::{
@@ -16,7 +16,11 @@ use super::records::{
 };
 
 /// Single JSON-RPC method dispatch for theme and admin clients.
-pub async fn dispatch(state: &AppState, method: &str, params: Option<&Value>) -> Result<Value, (i32, &'static str)> {
+pub async fn dispatch(
+    state: &AppState,
+    method: &str,
+    params: Option<&Value>,
+) -> Result<Value, (i32, &'static str)> {
     let method = alias_method(method);
     match method.as_str() {
         "rpc.ping" => Ok(Value::String("pong".into())),
@@ -26,11 +30,15 @@ pub async fn dispatch(state: &AppState, method: &str, params: Option<&Value>) ->
         "rpc.getVersion" => Ok(version_info()),
 
         "common:getPublicInfo" | "public:getPublicSettings" => Ok(public_settings(state).await),
-        "common:getBackendVersion" | "common:getVersion" | "public:getVersion" => Ok(version_info()),
+        "common:getBackendVersion" | "common:getVersion" | "public:getVersion" => {
+            Ok(version_info())
+        }
         "common:getMe" | "public:getMe" => Ok(guest_me()),
         "common:getNodes" | "public:getNodesInformation" => {
             if method == "public:getNodesInformation" {
-                public_nodes_list(state).await.map_err(|c| (c, "Internal error"))
+                public_nodes_list(state)
+                    .await
+                    .map_err(|c| (c, "Internal error"))
             } else {
                 common_get_nodes_map(state, param_uuid(params).as_deref()).await
             }

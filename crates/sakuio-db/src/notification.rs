@@ -61,14 +61,16 @@ impl<'a> NotificationRepository<'a> {
         .fetch_optional(self.pool)
         .await?;
         Ok(row.map(
-            |(id, channel_type, name, enabled, config_json, last_used_at, updated_at)| NotificationInstanceRow {
-                id,
-                channel_type,
-                name,
-                enabled: enabled != 0,
-                config: parse_config(&config_json),
-                last_used_at,
-                updated_at,
+            |(id, channel_type, name, enabled, config_json, last_used_at, updated_at)| {
+                NotificationInstanceRow {
+                    id,
+                    channel_type,
+                    name,
+                    enabled: enabled != 0,
+                    config: parse_config(&config_json),
+                    last_used_at,
+                    updated_at,
+                }
             },
         ))
     }
@@ -319,12 +321,14 @@ impl<'a> NotificationRepository<'a> {
     }
 
     pub async fn set_instance_enabled(&self, id: &str, enabled: bool) -> DbResult<bool> {
-        let result = sqlx::query("UPDATE notification_channel_instances SET enabled = ?, updated_at = ? WHERE id = ?")
-            .bind(if enabled { 1i64 } else { 0 })
-            .bind(Utc::now().to_rfc3339())
-            .bind(id)
-            .execute(self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE notification_channel_instances SET enabled = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(if enabled { 1i64 } else { 0 })
+        .bind(Utc::now().to_rfc3339())
+        .bind(id)
+        .execute(self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -338,12 +342,13 @@ impl<'a> NotificationRepository<'a> {
     }
 
     pub async fn set_rule_enabled(&self, id: &str, enabled: bool) -> DbResult<bool> {
-        let result = sqlx::query("UPDATE notification_rules SET enabled = ?, updated_at = ? WHERE id = ?")
-            .bind(if enabled { 1i64 } else { 0 })
-            .bind(Utc::now().to_rfc3339())
-            .bind(id)
-            .execute(self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE notification_rules SET enabled = ?, updated_at = ? WHERE id = ?")
+                .bind(if enabled { 1i64 } else { 0 })
+                .bind(Utc::now().to_rfc3339())
+                .bind(id)
+                .execute(self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 

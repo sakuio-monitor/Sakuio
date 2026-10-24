@@ -198,7 +198,9 @@ pub async fn common_get_nodes_map(
     filter_uuid: Option<&str>,
 ) -> Result<Value, (i32, &'static str)> {
     let show_partial_ip = crate::site_settings::load(state).await.show_partial_ip;
-    let rows = load_public_clients(state).await.map_err(|c| (c, "Internal error"))?;
+    let rows = load_public_clients(state)
+        .await
+        .map_err(|c| (c, "Internal error"))?;
     if let Some(uuid) = filter_uuid {
         let Some(row) = rows.into_iter().find(|r| r.uuid == uuid) else {
             return Err((-32602, "Node not found"));
@@ -210,10 +212,7 @@ pub async fn common_get_nodes_map(
         if row.disabled {
             continue;
         }
-        map.insert(
-            row.uuid.clone(),
-            client_record(&row, true, show_partial_ip),
-        );
+        map.insert(row.uuid.clone(), client_record(&row, true, show_partial_ip));
     }
     Ok(Value::Object(map))
 }
@@ -233,7 +232,9 @@ pub async fn common_get_nodes_latest_status(
     state: &AppState,
     filter_uuid: Option<&str>,
 ) -> Result<Value, (i32, &'static str)> {
-    let rows = load_public_clients(state).await.map_err(|c| (c, "Internal error"))?;
+    let rows = load_public_clients(state)
+        .await
+        .map_err(|c| (c, "Internal error"))?;
     let mut map = serde_json::Map::new();
     for row in rows {
         if row.disabled {

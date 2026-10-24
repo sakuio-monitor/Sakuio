@@ -8,7 +8,6 @@ pub use login::{login, logout, session_me};
 pub use middleware::{admin_auth_layer, AdminUser, RequireAdmin};
 pub use twofa::{disable_2fa, enable_2fa, setup_2fa};
 
-
 pub const SESSION_COOKIE: &str = "sakuio_session";
 /// Komari-theme / Komari compatibility cookie.
 pub const SESSION_COOKIE_COMPAT: &str = "session_token";
@@ -36,5 +35,3 @@ pub fn me_response(data: serde_json::Value, token: Option<&str>) -> serde_json::
     }
     flat
 }
-
-

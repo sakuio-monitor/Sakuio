@@ -25,7 +25,23 @@ struct P2Quantile {
 
 impl P2Quantile {
     fn new(q: f64) -> Self {
-        Self { q, n: 0, marks: [0.0; 5], positions: [1.0, 2.0, 3.0, 4.0, 5.0], desired: [0.0; 5] }
+        Self {
+            q,
+            n: 0,
+            marks: [0.0; 5],
+            positions: [1.0, 2.0, 3.0, 4.0, 5.0],
+            desired: [0.0; 5],
+        }
+    }
+
+    fn from_value(q: f64, value: f64) -> Self {
+        Self {
+            q,
+            n: 5,
+            marks: [value; 5],
+            positions: [1.0, 2.0, 3.0, 4.0, 5.0],
+            desired: [1.0, 1.0 + 2.0 * q, 1.0 + 4.0 * q, 3.0 + 2.0 * q, 5.0],
+        }
     }
 
     fn add(&mut self, value: f64) {
@@ -35,7 +51,13 @@ impl P2Quantile {
             if self.n == 5 {
                 self.marks.sort_by(|a, b| a.total_cmp(b));
                 self.positions = [1.0, 2.0, 3.0, 4.0, 5.0];
-                self.desired = [1.0, 1.0 + 2.0 * self.q, 1.0 + 4.0 * self.q, 3.0 + 2.0 * self.q, 5.0];
+                self.desired = [
+                    1.0,
+                    1.0 + 2.0 * self.q,
+                    1.0 + 4.0 * self.q,
+                    3.0 + 2.0 * self.q,
+                    5.0,
+                ];
             }
             return;
         }
@@ -48,8 +70,12 @@ impl P2Quantile {
         } else {
             (1..4).find(|&i| value < self.marks[i]).unwrap_or(3)
         };
-        for i in (k + 1)..5 { self.positions[i] += 1.0; }
-        for i in 0..5 { self.desired[i] += [0.0, 0.5 * self.q, self.q, 0.5 + 0.5 * self.q, 1.0][i]; }
+        for i in (k + 1)..5 {
+            self.positions[i] += 1.0;
+        }
+        for i in 0..5 {
+            self.desired[i] += [0.0, 0.5 * self.q, self.q, 0.5 + 0.5 * self.q, 1.0][i];
+        }
         for i in 1..4 {
             let d = self.desired[i] - self.positions[i];
             let p = self.positions[i - 1];
@@ -57,10 +83,10 @@ impl P2Quantile {
             let pp = self.positions[i];
             if (d >= 1.0 && n - pp > 1.0) || (d <= -1.0 && pp - p > 1.0) {
                 let dir = if d > 0.0 { 1.0 } else { -1.0 };
-                let candidate = self.marks[i] + dir / (n - p) * (
-                    (pp - p + dir) * (self.marks[i + 1] - self.marks[i]) / (n - pp)
-                    + (n - pp - dir) * (self.marks[i] - self.marks[i - 1]) / (pp - p)
-                );
+                let candidate = self.marks[i]
+                    + dir / (n - p)
+                        * ((pp - p + dir) * (self.marks[i + 1] - self.marks[i]) / (n - pp)
+                            + (n - pp - dir) * (self.marks[i] - self.marks[i - 1]) / (pp - p));
                 if candidate > self.marks[i - 1] && candidate < self.marks[i + 1] {
                     self.marks[i] = candidate;
                 }
@@ -70,7 +96,9 @@ impl P2Quantile {
     }
 
     fn value(&self) -> f64 {
-        if self.n == 0 { return 0.0; }
+        if self.n == 0 {
+            return 0.0;
+        }
         if self.n < 5 {
             let mut values = self.marks;
             values.sort_by(|a, b| a.total_cmp(b));
@@ -81,7 +109,11 @@ impl P2Quantile {
         for i in 1..5 {
             if qpos <= self.positions[i] {
                 let span = self.positions[i] - self.positions[i - 1];
-                let frac = if span <= 0.0 { 0.0 } else { (qpos - self.positions[i - 1]) / span };
+                let frac = if span <= 0.0 {
+                    0.0
+                } else {
+                    (qpos - self.positions[i - 1]) / span
+                };
                 return self.marks[i - 1] + frac * (self.marks[i] - self.marks[i - 1]);
             }
         }
@@ -160,6 +192,46 @@ impl BucketAggregator {
         rows
     }
 
+    /// Restores open-window counts from a durable checkpoint. Exact sums,
+    /// min/max/count are restored; quantiles are seeded from the persisted
+    /// p-values and continue updating with new samples.
+    pub fn restore(&mut self, node: &str, rows: &[BucketRow]) {
+        let state = self.nodes.entry(node.to_string()).or_default();
+        for row in rows {
+            if !WINDOW_SECONDS.contains(&row.bucket_seconds) || row.sample_count <= 0 {
+                continue;
+            }
+            let key = metric_key_static(&row.metric_key);
+            if key.is_empty() {
+                continue;
+            }
+            let win = state.windows.entry(row.bucket_seconds).or_default();
+            if win.start_ms != row.bucket_start_ms {
+                win.reset(row.bucket_start_ms);
+            }
+            win.sums.insert(
+                metric_key_static(&row.metric_key),
+                row.avg_val * row.sample_count as f64,
+            );
+            win.sums_sq
+                .insert(metric_key_static(&row.metric_key), row.sum_sq);
+            win.mins
+                .insert(metric_key_static(&row.metric_key), row.min_val);
+            win.maxs
+                .insert(metric_key_static(&row.metric_key), row.max_val);
+            win.counts
+                .insert(metric_key_static(&row.metric_key), row.sample_count);
+            win.quantiles.insert(
+                metric_key_static(&row.metric_key),
+                [
+                    P2Quantile::from_value(0.50, row.p50_val),
+                    P2Quantile::from_value(0.95, row.p95_val),
+                    P2Quantile::from_value(0.99, row.p99_val),
+                ],
+            );
+        }
+    }
+
     /// Snapshot of all currently open windows without resetting them.
     /// Used for periodic durability checkpoints.
     pub fn snapshot(&self) -> Vec<BucketRow> {
@@ -190,6 +262,14 @@ impl BucketAggregator {
     }
 }
 
+fn metric_key_static(key: &str) -> &'static str {
+    METRIC_KEYS
+        .iter()
+        .find(|def| def.key == key)
+        .map(|def| def.key)
+        .unwrap_or("")
+}
+
 fn traffic_delta(state: &mut NodeWindows, sample: &TelemetrySample) -> TrafficDelta {
     let now_totals = (sample.network.total_up, sample.network.total_down);
     let delta = if state.has_totals {
@@ -199,11 +279,17 @@ fn traffic_delta(state: &mut NodeWindows, sample: &TelemetrySample) -> TrafficDe
         let (up, down) = if sample.network.total_up < state.last_totals.0
             || sample.network.total_down < state.last_totals.1
         {
-            (sample.network.total_up as f64, sample.network.total_down as f64)
+            (
+                sample.network.total_up as f64,
+                sample.network.total_down as f64,
+            )
         } else {
             (
                 sample.network.total_up.saturating_sub(state.last_totals.0) as f64,
-                sample.network.total_down.saturating_sub(state.last_totals.1) as f64,
+                sample
+                    .network
+                    .total_down
+                    .saturating_sub(state.last_totals.1) as f64,
             )
         };
         TrafficDelta { up, down }
@@ -219,9 +305,15 @@ fn accumulate(win: &mut WindowState, def: &MetricDef, value: f64) {
     *win.sums.entry(def.key).or_default() += value;
     *win.sums_sq.entry(def.key).or_default() += value * value;
     let q = win.quantiles.entry(def.key).or_insert_with(|| {
-        [P2Quantile::new(0.50), P2Quantile::new(0.95), P2Quantile::new(0.99)]
+        [
+            P2Quantile::new(0.50),
+            P2Quantile::new(0.95),
+            P2Quantile::new(0.99),
+        ]
     });
-    for estimator in q.iter_mut() { estimator.add(value); }
+    for estimator in q.iter_mut() {
+        estimator.add(value);
+    }
     let min = win.mins.entry(def.key).or_insert(value);
     if value < *min {
         *min = value;

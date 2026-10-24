@@ -3,6 +3,7 @@
 
 use crate::database_api::MetricRuntime;
 use axum::{extract::Query, http::StatusCode, Json};
+use sakuio_board::BoardStateStore;
 use sakuio_db::DbPool;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -310,13 +311,10 @@ impl DashboardService {
             )
         });
         let main_bytes = main_db_size(&self.pool).await;
-        let metric_bytes = self
-            .metric
-            .current_store()
-            .await
-            .size_bytes()
-            .await
-            .unwrap_or(0);
+        let metric_store = self.metric.current_store().await;
+        let metric_kind = metric_store.kind();
+        let metric_bytes = metric_store.size_bytes().await.unwrap_or(0);
+        let shared_database = metric_kind == sakuio_metric::MetricKind::Merged;
         let ping = self
             .ping_quality(range, &meta_map)
             .await
@@ -341,8 +339,13 @@ impl DashboardService {
                 },
                 "database": {
                     "main_bytes": main_bytes,
-                    "metrics_bytes": metric_bytes,
-                    "total_bytes": main_bytes.saturating_add(metric_bytes)
+                    "metrics_bytes": if shared_database { 0 } else { metric_bytes },
+                    "total_bytes": if shared_database {
+                        main_bytes
+                    } else {
+                        main_bytes.saturating_add(metric_bytes)
+                    },
+                    "shared": shared_database
                 },
                 "expiry": expiry,
                 "traffic": {
@@ -697,6 +700,53 @@ impl DashboardService {
     }
 }
 
+async fn live_online_counts(state: &crate::AppState) -> (usize, usize) {
+    let Ok(rows) = sqlx::query_as::<_, (String,)>("SELECT uuid FROM clients WHERE disabled = 0")
+        .fetch_all(&state.db)
+        .await
+    else {
+        return (0, 0);
+    };
+    let mut online = 0usize;
+    for (uuid,) in &rows {
+        if state
+            .board
+            .resolve_presence(uuid)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            online += 1;
+        }
+    }
+    (online, rows.len())
+}
+
+/// The DB online flag can lag behind the live board session (crash/restart or a
+/// stale row). The dashboard must use the same source as the server list.
+async fn hydrate_dashboard_online(state: &crate::AppState, value: &mut Value) {
+    let (online, total) = live_online_counts(state).await;
+    let offline = total.saturating_sub(online);
+    let percent = if total > 0 {
+        online as f64 / total as f64 * 100.0
+    } else {
+        0.0
+    };
+    if let Some(data) = value.get_mut("data").and_then(Value::as_object_mut) {
+        if let Some(overview) = data.get_mut("overview").and_then(Value::as_object_mut) {
+            overview.insert("online".into(), json!(online));
+            overview.insert("offline".into(), json!(offline));
+            overview.insert("total".into(), json!(total));
+            overview.insert("online_percent".into(), json!(percent));
+        }
+        if let Some(capacity) = data.get_mut("capacity").and_then(Value::as_object_mut) {
+            capacity.insert("online".into(), json!(online));
+            capacity.insert("total".into(), json!(total));
+        }
+    }
+}
+
 async fn resolve_dashboard(
     state: &crate::AppState,
     query: &BootstrapQuery,
@@ -709,18 +759,22 @@ async fn resolve_dashboard(
         if until <= since {
             return Err((StatusCode::BAD_REQUEST, "end must be after start".into()));
         }
-        return state
+        let mut value = state
             .dashboard
             .bootstrap_custom(since, until)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e));
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        hydrate_dashboard_online(state, &mut value).await;
+        return Ok(value);
     }
     let range = normalize_range(query.range.as_deref().unwrap_or("24h"));
-    state
+    let mut value = state
         .dashboard
         .bootstrap(range)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    hydrate_dashboard_online(state, &mut value).await;
+    Ok(value)
 }
 
 pub async fn bootstrap(
@@ -757,18 +811,21 @@ pub async fn stream(
     use axum::response::IntoResponse;
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(8);
     let pool = state.db.clone();
+    let board = state.board.clone();
     tokio::spawn(async move {
         loop {
-            let online: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM clients WHERE disabled = 0 AND online = 1",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap_or(0);
-            let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM clients WHERE disabled = 0")
-                .fetch_one(&pool)
-                .await
-                .unwrap_or(0);
+            let rows: Vec<(String,)> =
+                sqlx::query_as("SELECT uuid FROM clients WHERE disabled = 0")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap_or_default();
+            let mut online: i64 = 0;
+            for (uuid,) in &rows {
+                if board.resolve_presence(uuid).await.ok().flatten().is_some() {
+                    online += 1;
+                }
+            }
+            let total = rows.len() as i64;
             let revision: i64 =
                 sqlx::query_scalar("SELECT COALESCE(MAX(revision), 0) FROM dashboard_meta")
                     .fetch_one(&pool)

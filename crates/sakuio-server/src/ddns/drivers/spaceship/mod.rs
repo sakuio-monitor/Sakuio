@@ -11,14 +11,34 @@ struct SpaceshipDriver;
 
 #[async_trait]
 impl DdnsDriver for SpaceshipDriver {
-    fn id(&self) -> &'static str { "spaceship" }
-    fn name(&self) -> &'static str { "Spaceship" }
-    fn description(&self) -> &'static str { "Spaceship API Key / Secret，自动维护 A/AAAA 记录" }
+    fn id(&self) -> &'static str {
+        "spaceship"
+    }
+    fn name(&self) -> &'static str {
+        "Spaceship"
+    }
+    fn description(&self) -> &'static str {
+        "Spaceship API Key / Secret，自动维护 A/AAAA 记录"
+    }
 
     fn fields(&self) -> Vec<DriverField> {
         vec![
-            DriverField { key: "api_key", label: "API Key", kind: "password", required: true, placeholder: "Spaceship API Key", options: None },
-            DriverField { key: "api_secret", label: "API Secret", kind: "password", required: true, placeholder: "Spaceship API Secret", options: None },
+            DriverField {
+                key: "api_key",
+                label: "API Key",
+                kind: "password",
+                required: true,
+                placeholder: "Spaceship API Key",
+                options: None,
+            },
+            DriverField {
+                key: "api_secret",
+                label: "API Secret",
+                kind: "password",
+                required: true,
+                placeholder: "Spaceship API Secret",
+                options: None,
+            },
         ]
     }
 
@@ -33,7 +53,11 @@ impl DdnsDriver for SpaceshipDriver {
         let secret = common::required(config, "api_secret", "API Secret")?;
         let client = common::client()?;
         let zone = request.zone_name.trim().trim_end_matches('.');
-        let name = if request.record_name.trim().is_empty() { "@" } else { request.record_name.trim() };
+        let name = if request.record_name.trim().is_empty() {
+            "@"
+        } else {
+            request.record_name.trim()
+        };
         let body = json!({ "items": [{
             "type": request.record_type.to_ascii_uppercase(),
             "name": name,
@@ -51,7 +75,10 @@ impl DdnsDriver for SpaceshipDriver {
         if !response.status().is_success() {
             return Err(common::error_message(response).await);
         }
-        Ok(DdnsResult { zone_id: zone.to_string(), record_id: String::new() })
+        Ok(DdnsResult {
+            zone_id: zone.to_string(),
+            record_id: String::new(),
+        })
     }
 }
 
@@ -63,7 +90,10 @@ mod tests {
     #[test]
     fn driver_metadata() {
         assert_eq!(SpaceshipDriver.id(), "spaceship");
-        assert!(SpaceshipDriver.fields().iter().any(|f| f.key == "api_secret"));
+        assert!(SpaceshipDriver
+            .fields()
+            .iter()
+            .any(|f| f.key == "api_secret"));
     }
     #[tokio::test]
     async fn requires_credentials() {

@@ -17,7 +17,9 @@ async fn token(config: &Value) -> Result<(String, String, String), String> {
     let group = common::required(config, "resource_group", "资源组")?;
     let client = common::client()?;
     let response = client
-        .post(format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"))
+        .post(format!(
+            "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+        ))
         .form(&[
             ("client_id", client_id.as_str()),
             ("client_secret", secret.as_str()),
@@ -30,8 +32,15 @@ async fn token(config: &Value) -> Result<(String, String, String), String> {
     if !response.status().is_success() {
         return Err(common::error_message(response).await);
     }
-    let value: Value = response.json().await.map_err(|error| format!("解析 Azure 登录响应失败：{error}"))?;
-    let access_token = value.get("access_token").and_then(Value::as_str).unwrap_or_default().to_string();
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("解析 Azure 登录响应失败：{error}"))?;
+    let access_token = value
+        .get("access_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     if access_token.is_empty() {
         return Err("Azure 未返回 access_token".into());
     }
@@ -40,17 +49,58 @@ async fn token(config: &Value) -> Result<(String, String, String), String> {
 
 #[async_trait]
 impl DdnsDriver for AzureDriver {
-    fn id(&self) -> &'static str { "azure" }
-    fn name(&self) -> &'static str { "Azure DNS" }
-    fn description(&self) -> &'static str { "Azure 服务主体，自动维护 DNS Zone 的 A/AAAA 记录" }
+    fn id(&self) -> &'static str {
+        "azure"
+    }
+    fn name(&self) -> &'static str {
+        "Azure DNS"
+    }
+    fn description(&self) -> &'static str {
+        "Azure 服务主体，自动维护 DNS Zone 的 A/AAAA 记录"
+    }
 
     fn fields(&self) -> Vec<DriverField> {
         vec![
-            DriverField { key: "tenant_id", label: "Tenant ID", kind: "text", required: true, placeholder: "Azure Tenant ID", options: None },
-            DriverField { key: "client_id", label: "Client ID", kind: "text", required: true, placeholder: "Azure Client ID", options: None },
-            DriverField { key: "client_secret", label: "Client Secret", kind: "password", required: true, placeholder: "Azure Client Secret", options: None },
-            DriverField { key: "subscription_id", label: "Subscription ID", kind: "text", required: true, placeholder: "Azure Subscription ID", options: None },
-            DriverField { key: "resource_group", label: "资源组", kind: "text", required: true, placeholder: "DNS Zone 所在资源组", options: None },
+            DriverField {
+                key: "tenant_id",
+                label: "Tenant ID",
+                kind: "text",
+                required: true,
+                placeholder: "Azure Tenant ID",
+                options: None,
+            },
+            DriverField {
+                key: "client_id",
+                label: "Client ID",
+                kind: "text",
+                required: true,
+                placeholder: "Azure Client ID",
+                options: None,
+            },
+            DriverField {
+                key: "client_secret",
+                label: "Client Secret",
+                kind: "password",
+                required: true,
+                placeholder: "Azure Client Secret",
+                options: None,
+            },
+            DriverField {
+                key: "subscription_id",
+                label: "Subscription ID",
+                kind: "text",
+                required: true,
+                placeholder: "Azure Subscription ID",
+                options: None,
+            },
+            DriverField {
+                key: "resource_group",
+                label: "资源组",
+                kind: "text",
+                required: true,
+                placeholder: "DNS Zone 所在资源组",
+                options: None,
+            },
         ]
     }
 
@@ -71,7 +121,11 @@ impl DdnsDriver for AzureDriver {
         if record_type != "A" && record_type != "AAAA" {
             return Err("Azure DNS 仅支持 A/AAAA".into());
         }
-        let name = if request.record_name.trim().is_empty() { "@" } else { request.record_name.trim() };
+        let name = if request.record_name.trim().is_empty() {
+            "@"
+        } else {
+            request.record_name.trim()
+        };
         let properties = if record_type == "A" {
             json!({"TTL": request.ttl.max(60), "ARecords": [{"ipv4Address": request.content}]})
         } else {
@@ -90,7 +144,10 @@ impl DdnsDriver for AzureDriver {
         if !response.status().is_success() {
             return Err(common::error_message(response).await);
         }
-        Ok(DdnsResult { zone_id: zone.to_string(), record_id: String::new() })
+        Ok(DdnsResult {
+            zone_id: zone.to_string(),
+            record_id: String::new(),
+        })
     }
 }
 

@@ -71,6 +71,26 @@ impl DbPool {
         sqlx::any::install_default_drivers();
         let kind = DbKind::detect(dsn);
         let max_connections = options.get_max_connections();
+        let options = if kind == DbKind::Sqlite {
+            options.after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    for pragma in [
+                        "PRAGMA journal_mode=WAL",
+                        "PRAGMA synchronous=NORMAL",
+                        "PRAGMA busy_timeout=5000",
+                        "PRAGMA temp_store=MEMORY",
+                        "PRAGMA cache_size=-20000",
+                        "PRAGMA foreign_keys=ON",
+                        "PRAGMA wal_autocheckpoint=1000",
+                    ] {
+                        sqlx::query(pragma).execute(&mut *conn).await?;
+                    }
+                    Ok(())
+                })
+            })
+        } else {
+            options
+        };
         let inner = options.connect(dsn).await?;
         // WAL is a file-level setting; enabling it once at open time avoids
         // writer/reader contention on the default SQLite journal.

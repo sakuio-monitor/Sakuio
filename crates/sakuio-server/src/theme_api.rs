@@ -275,7 +275,10 @@ pub async fn install_market(
     let force = query.get("refresh").is_some_and(|value| value != "0");
     let source = query.get("source").cloned();
     let proxy = query.get("proxy").cloned();
-    let job = state.theme.start_market_install(short, source, proxy, force).await;
+    let job = state
+        .theme
+        .start_market_install(short, source, proxy, force)
+        .await;
     (
         StatusCode::ACCEPTED,
         Json(json!({ "success": true, "job_id": job.id() })),

@@ -115,9 +115,12 @@ impl MetricWriterHandle {
         let mut replies = Vec::with_capacity(senders.len());
         for tx in senders {
             let (reply, result) = oneshot::channel();
-            tx.send(WriterCommand::Flush { store: store.clone(), reply })
-                .await
-                .map_err(|_| "metric writer stopped".to_string())?;
+            tx.send(WriterCommand::Flush {
+                store: store.clone(),
+                reply,
+            })
+            .await
+            .map_err(|_| "metric writer stopped".to_string())?;
             replies.push(result);
         }
         let mut total = 0u64;
@@ -193,7 +196,13 @@ impl MetricWriter {
             let dropped = dropped.clone();
             Arc::new(move || {
                 for index in 0..max_workers {
-                    spawn_slot(&workers, index, store_rx.clone(), policy.clone(), dropped.clone());
+                    spawn_slot(
+                        &workers,
+                        index,
+                        store_rx.clone(),
+                        policy.clone(),
+                        dropped.clone(),
+                    );
                 }
             })
         };
@@ -208,7 +217,13 @@ impl MetricWriter {
         // them: a low-volume node may hash to any shard, and leaving that shard
         // idle would queue its samples forever below the autoscaler threshold.
         for index in 0..max_workers {
-            spawn_slot(&workers, index, store_rx.clone(), policy.clone(), dropped.clone());
+            spawn_slot(
+                &workers,
+                index,
+                store_rx.clone(),
+                policy.clone(),
+                dropped.clone(),
+            );
         }
 
         // Autoscaler: start more pre-created slots while queues back up, but
@@ -235,7 +250,13 @@ impl MetricWriter {
                 };
                 if load > capacity / 4 {
                     if let Some(index) = next {
-                        spawn_slot(&workers_scale, index, store_scale.clone(), policy_scale.clone(), dropped_scale.clone());
+                        spawn_slot(
+                            &workers_scale,
+                            index,
+                            store_scale.clone(),
+                            policy_scale.clone(),
+                            dropped_scale.clone(),
+                        );
                     }
                 }
                 // Coalesced overflow is re-injected when capacity opens up.
@@ -258,8 +279,9 @@ impl MetricWriter {
         let cleanup_rx = store_rx;
         let cleanup_pool = main_pool;
         tokio::spawn(async move {
+            // Reclaim immediately after a deploy, then hourly.
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(3_600)).await;
                 if sakuio_db::maintenance_active() {
                     continue;
                 }
@@ -281,13 +303,24 @@ impl MetricWriter {
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error = %e, "metric bucket cleanup failed"),
                 }
+                if let Err(e) = store.reclaim_space().await {
+                    tracing::warn!(error = %e, "metric database space reclaim failed");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3_600)).await;
             }
         });
 
-        (Self { workers, overflow, dropped }, handle)
+        (
+            Self {
+                workers,
+                overflow,
+                dropped,
+            },
+            handle,
+        )
     }
 
-/// Enqueues samples; drops when the queue is full and increments counter.
+    /// Enqueues samples; drops when the queue is full and increments counter.
     /// 将采样入队；队列满时丢弃并递增计数。
     pub fn enqueue(&self, node_uuid: String, samples: Vec<TelemetrySample>) {
         if samples.is_empty() {
@@ -296,7 +329,10 @@ impl MetricWriter {
         if !try_enqueue(&self.workers, &self.overflow, node_uuid, samples) {
             let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
             if n % 100 == 1 {
-                tracing::warn!(dropped_batches = n, "metric ingest overflow, coalescing latest samples");
+                tracing::warn!(
+                    dropped_batches = n,
+                    "metric ingest overflow, coalescing latest samples"
+                );
             }
         }
     }
@@ -332,7 +368,10 @@ fn try_enqueue(
     // have a different traffic baseline and could emit duplicate buckets.
     let index = shard_index(&node_uuid, guard.ingest.len());
     let tx = &guard.ingest[index];
-    let mut job = Some(MetricIngestJob { node_uuid: node_uuid.clone(), samples });
+    let mut job = Some(MetricIngestJob {
+        node_uuid: node_uuid.clone(),
+        samples,
+    });
     match tx.try_send(job.take().expect("metric job")) {
         Ok(()) => return true,
         Err(mpsc::error::TrySendError::Full(returned)) => job = Some(returned),
@@ -378,7 +417,15 @@ fn spawn_slot(
         )
     };
     if let (Some(rx), Some(control_rx)) = (rx, control_rx) {
-        spawn_worker(rx, control_rx, store_rx, policy, dropped);
+        spawn_worker(
+            rx,
+            control_rx,
+            store_rx,
+            policy,
+            dropped,
+            index,
+            workers.read().map(|w| w.ingest.len()).unwrap_or(1),
+        );
     }
 }
 
@@ -388,9 +435,19 @@ fn spawn_worker(
     store_rx: watch::Receiver<Arc<MetricStore>>,
     policy: Arc<RwLock<Arc<RetentionPolicy>>>,
     dropped: Arc<AtomicU64>,
+    shard: usize,
+    shard_count: usize,
 ) {
     tokio::spawn(async move {
         let mut aggregator = BucketAggregator::default();
+        let boot_store = store_rx.borrow().clone();
+        if let Ok(checkpoints) = boot_store.load_checkpoints().await {
+            for (node, rows) in checkpoints {
+                if shard_index(&node, shard_count) == shard {
+                    aggregator.restore(&node, &rows);
+                }
+            }
+        }
         let mut pending: Vec<crate::store::BucketRow> = Vec::new();
         let mut current: Arc<MetricStore> = store_rx.borrow().clone();
         let mut last_flush = tokio::time::Instant::now();
@@ -399,7 +456,12 @@ fn spawn_worker(
                 biased;
                 job = rx.recv() => {
                     let Some(job) = job else {
+                        let open = aggregator.snapshot();
+                        if !open.is_empty() {
+                            let _ = current.save_checkpoints(&open).await;
+                        }
                         flush_pending(&current, &mut pending).await;
+                        let _ = current.clear_checkpoints().await;
                         tracing::info!("metric worker stopped");
                         let _ = dropped;
                         return;
@@ -432,12 +494,12 @@ fn spawn_worker(
                     if !pending.is_empty() {
                         flush_pending(&current, &mut pending).await;
                     }
-                    // Durability checkpoint: persist the current open windows
-                    // too, so a crash loses at most one 3s interval.
-                    let mut open = aggregator.snapshot();
+                    // Persist open windows in the compact checkpoint table,
+                    // never as full metric_buckets rows.
+                    let open = aggregator.snapshot();
                     if !open.is_empty() {
-                        if let Err(e) = write_pending(&current, &mut open).await {
-                            tracing::warn!(error = %e, "partial metric checkpoint failed");
+                        if let Err(e) = current.save_checkpoints(&open).await {
+                            tracing::warn!(error = %e, "metric checkpoint save failed");
                         }
                     }
                     last_flush = tokio::time::Instant::now();

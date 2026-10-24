@@ -6,8 +6,8 @@ use crate::auth::RequireAdmin;
 use crate::web::respond::{api_error, api_success};
 use crate::AppState;
 use axum_extra::extract::CookieJar;
-use sakuio_db::{generate_totp_secret, totp_provisioning_uri, AdminAuthRepository};
 use qrcodegen::{QrCode, QrCodeEcc};
+use sakuio_db::{generate_totp_secret, totp_provisioning_uri, AdminAuthRepository};
 
 #[derive(Deserialize)]
 pub struct TwoFaCodeBody {
@@ -100,11 +100,7 @@ pub async fn disable_2fa(
         Err(s) => return api_error(s, "Unauthorized"),
     };
     let repo = AdminAuthRepository::new(&state.db);
-    let Some((_, hash, _, secret)) = repo
-        .find_by_username(&user.username)
-        .await
-        .ok()
-        .flatten()
+    let Some((_, hash, _, secret)) = repo.find_by_username(&user.username).await.ok().flatten()
     else {
         return api_error(StatusCode::UNAUTHORIZED, "Unauthorized");
     };

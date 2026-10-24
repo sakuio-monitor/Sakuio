@@ -10,12 +10,11 @@ pub async fn ensure_timescale(pool: &DbPool, prefix: &str) -> Result<(), sqlx::E
     if pool.kind() != DbKind::Postgres {
         return Ok(());
     }
-    let installed: Option<String> = sqlx::query_scalar(
-        "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'",
-    )
-    .fetch_optional(pool)
-    .await
-    .unwrap_or(None);
+    let installed: Option<String> =
+        sqlx::query_scalar("SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
     if installed.is_none() {
         tracing::info!("TimescaleDB not installed; metric buckets use regular PostgreSQL tables");
         return Ok(());

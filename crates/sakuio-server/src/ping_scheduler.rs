@@ -1,8 +1,8 @@
+use futures_util::StreamExt;
 use sakuio_board::BoardStateStore;
 use sakuio_core::AgentCommandBus;
 use sakuio_db::DbPool;
 use sakuio_db::{PingRepository, PingTaskRow};
-use futures_util::StreamExt;
 use sakuio_protocol::{
     AgentPingBatchParams, AgentPingParams, ControlMessage, ControlOp, METHOD_AGENT_PING,
     METHOD_AGENT_PING_BATCH,
@@ -100,24 +100,25 @@ async fn fire_group(
     // Old agents do not understand agent.pingBatch; keep individual commands
     // for them so a protocol upgrade cannot silently lose ping samples.
     let versions: std::collections::HashMap<String, String> =
-        sqlx::query_as::<_, (String, Option<String>)>(
-            "SELECT uuid, agent_version FROM clients",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(uuid, version)| (uuid, version.unwrap_or_default()))
-        .collect();
+        sqlx::query_as::<_, (String, Option<String>)>("SELECT uuid, agent_version FROM clients")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(uuid, version)| (uuid, version.unwrap_or_default()))
+            .collect();
 
     let mut by_node: HashMap<String, Vec<AgentPingParams>> = HashMap::new();
     for task in tasks {
         for uuid in &task.clients {
-            by_node.entry(uuid.clone()).or_default().push(AgentPingParams {
-                task_id: task.id as u64,
-                ping_type: task.task_type.clone(),
-                target: task.target.clone(),
-            });
+            by_node
+                .entry(uuid.clone())
+                .or_default()
+                .push(AgentPingParams {
+                    task_id: task.id as u64,
+                    ping_type: task.task_type.clone(),
+                    target: task.target.clone(),
+                });
         }
     }
     let versions = Arc::new(versions);
@@ -126,17 +127,17 @@ async fn fire_group(
         .map(|(uuid, tasks)| {
             let versions = versions.clone();
             async move {
-            let batch = versions
-                .get(&uuid)
-                .is_some_and(|version| supports_ping_batch(version));
-            if batch {
-                dispatch_ping_batch(board, bus, &uuid, tasks).await;
-            } else {
-                for task in tasks {
-                    dispatch_ping(board, bus, &uuid, task).await;
+                let batch = versions
+                    .get(&uuid)
+                    .is_some_and(|version| supports_ping_batch(version));
+                if batch {
+                    dispatch_ping_batch(board, bus, &uuid, tasks).await;
+                } else {
+                    for task in tasks {
+                        dispatch_ping(board, bus, &uuid, task).await;
+                    }
                 }
             }
-        }
         })
         .buffer_unordered(concurrency)
         .for_each(|_| async {})
@@ -145,9 +146,18 @@ async fn fire_group(
 
 fn supports_ping_batch(version: &str) -> bool {
     let mut parts = version.trim_start_matches('v').split('.');
-    let major = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
-    let minor = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
-    let patch = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+    let major = parts
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    let minor = parts
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    let patch = parts
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
     (major, minor, patch) >= (0, 0, 8)
 }
 

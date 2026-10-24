@@ -10,10 +10,10 @@ mod exec;
 mod geo_cache;
 mod install;
 mod maintenance;
+mod metric_storage;
 mod notification;
 mod ping;
 mod schema;
-mod metric_storage;
 mod settings;
 
 pub use admin_auth::{
@@ -102,7 +102,9 @@ impl AppDatabase {
             "sqlite::memory:".to_string()
         } else {
             match kind {
-                DbKind::Sqlite if dsn.trim().is_empty() => "sqlite://data/sakuio.db?mode=rwc".into(),
+                DbKind::Sqlite if dsn.trim().is_empty() => {
+                    "sqlite://data/sakuio.db?mode=rwc".into()
+                }
                 DbKind::Sqlite if !dsn.contains("://") => {
                     format!("sqlite://{}?mode=rwc", dsn.trim_start_matches("./"))
                 }
@@ -125,7 +127,13 @@ impl AppDatabase {
         let pool = DbPool::connect_with(
             AnyPoolOptions::new()
                 .max_connections(max_connections.clamp(1, 64))
-                .min_connections(0)
+                // Keep a few warm connections for network backends; SQLite
+                // opens are cheap and should not pin extra file handles.
+                .min_connections(if kind == DbKind::Sqlite {
+                    0
+                } else {
+                    max_connections.min(4)
+                })
                 .idle_timeout(Duration::from_secs(60))
                 .max_lifetime(Duration::from_secs(30 * 60))
                 .acquire_timeout(Duration::from_secs(15)),

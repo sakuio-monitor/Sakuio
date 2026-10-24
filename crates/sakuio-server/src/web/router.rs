@@ -4,11 +4,11 @@ use axum::Router;
 use crate::AppState;
 
 use super::clients_ws::{clients_sse, clients_websocket};
+use super::respond::api_error;
 use super::rpc::{
     api_nodes, api_public, api_public_ping_records, api_public_ping_tasks, api_recent,
     api_records_load, api_version, rpc2_get, rpc2_post,
 };
-use super::respond::api_error;
 
 async fn ping() -> &'static str {
     "pong"

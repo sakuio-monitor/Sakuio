@@ -36,7 +36,11 @@ pub async fn run(args: &[String]) -> Result<()> {
             let new_name = args
                 .get(1)
                 .filter(|value| !value.starts_with("--"))
-                .ok_or_else(|| anyhow!("usage: sakuio-server admin set-username NEW_NAME [--username OLD_NAME]"))?;
+                .ok_or_else(|| {
+                    anyhow!(
+                        "usage: sakuio-server admin set-username NEW_NAME [--username OLD_NAME]"
+                    )
+                })?;
             let new_name = new_name.trim();
             if new_name.is_empty() {
                 bail!("new username must not be empty");

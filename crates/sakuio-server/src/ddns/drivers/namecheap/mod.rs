@@ -81,9 +81,18 @@ fn zone_parts(zone: &str) -> Result<(String, String), String> {
 
 fn auth_params(config: &Value, ip: &str, command: &str) -> Result<Vec<(String, String)>, String> {
     Ok(vec![
-        ("ApiUser".into(), common::required(config, "api_user", "API User")?),
-        ("ApiKey".into(), common::required(config, "api_key", "API Key")?),
-        ("UserName".into(), common::required(config, "api_user", "API User")?),
+        (
+            "ApiUser".into(),
+            common::required(config, "api_user", "API User")?,
+        ),
+        (
+            "ApiKey".into(),
+            common::required(config, "api_key", "API Key")?,
+        ),
+        (
+            "UserName".into(),
+            common::required(config, "api_user", "API User")?,
+        ),
         ("ClientIp".into(), ip.into()),
         ("Command".into(), command.into()),
     ])
@@ -91,15 +100,42 @@ fn auth_params(config: &Value, ip: &str, command: &str) -> Result<Vec<(String, S
 
 #[async_trait]
 impl DdnsDriver for NamecheapDriver {
-    fn id(&self) -> &'static str { "namecheap" }
-    fn name(&self) -> &'static str { "Namecheap" }
-    fn description(&self) -> &'static str { "Namecheap API User / Key，自动维护 A/AAAA 记录" }
+    fn id(&self) -> &'static str {
+        "namecheap"
+    }
+    fn name(&self) -> &'static str {
+        "Namecheap"
+    }
+    fn description(&self) -> &'static str {
+        "Namecheap API User / Key，自动维护 A/AAAA 记录"
+    }
 
     fn fields(&self) -> Vec<DriverField> {
         vec![
-            DriverField { key: "api_user", label: "API User", kind: "text", required: true, placeholder: "Namecheap 用户名", options: None },
-            DriverField { key: "api_key", label: "API Key", kind: "password", required: true, placeholder: "Namecheap API Key", options: None },
-            DriverField { key: "client_ip", label: "客户端 IP", kind: "text", required: false, placeholder: "留空自动获取（需在 Namecheap 白名单）", options: None },
+            DriverField {
+                key: "api_user",
+                label: "API User",
+                kind: "text",
+                required: true,
+                placeholder: "Namecheap 用户名",
+                options: None,
+            },
+            DriverField {
+                key: "api_key",
+                label: "API Key",
+                kind: "password",
+                required: true,
+                placeholder: "Namecheap API Key",
+                options: None,
+            },
+            DriverField {
+                key: "client_ip",
+                label: "客户端 IP",
+                kind: "text",
+                required: false,
+                placeholder: "留空自动获取（需在 Namecheap 白名单）",
+                options: None,
+            },
         ]
     }
 
@@ -126,12 +162,22 @@ impl DdnsDriver for NamecheapDriver {
             .map_err(|error| format!("连接 Namecheap 失败：{error}"))?;
         let xml = response.text().await.map_err(|error| error.to_string())?;
         if !status_ok(&xml) {
-            return Err(format!("Namecheap 获取解析失败：{}", xml.chars().take(240).collect::<String>()));
+            return Err(format!(
+                "Namecheap 获取解析失败：{}",
+                xml.chars().take(240).collect::<String>()
+            ));
         }
         let mut hosts = parse_hosts(&xml);
-        let name = if request.record_name.trim().is_empty() { "@" } else { request.record_name.trim() };
+        let name = if request.record_name.trim().is_empty() {
+            "@"
+        } else {
+            request.record_name.trim()
+        };
         let record_type = request.record_type.to_ascii_uppercase();
-        hosts.retain(|host| !(host.name.eq_ignore_ascii_case(name) && host.record_type.eq_ignore_ascii_case(&record_type)));
+        hosts.retain(|host| {
+            !(host.name.eq_ignore_ascii_case(name)
+                && host.record_type.eq_ignore_ascii_case(&record_type))
+        });
         hosts.push(Host {
             name: name.into(),
             record_type,
@@ -147,8 +193,22 @@ impl DdnsDriver for NamecheapDriver {
             form.push((format!("HostName{n}"), host.name.clone()));
             form.push((format!("RecordType{n}"), host.record_type.clone()));
             form.push((format!("Address{n}"), host.address.clone()));
-            form.push((format!("TTL{n}"), if host.ttl.is_empty() { "1800".into() } else { host.ttl.clone() }));
-            form.push((format!("MXPref{n}"), if host.mx.is_empty() { "10".into() } else { host.mx.clone() }));
+            form.push((
+                format!("TTL{n}"),
+                if host.ttl.is_empty() {
+                    "1800".into()
+                } else {
+                    host.ttl.clone()
+                },
+            ));
+            form.push((
+                format!("MXPref{n}"),
+                if host.mx.is_empty() {
+                    "10".into()
+                } else {
+                    host.mx.clone()
+                },
+            ));
         }
         let response = client
             .post(API)
@@ -158,9 +218,15 @@ impl DdnsDriver for NamecheapDriver {
             .map_err(|error| format!("Namecheap 更新失败：{error}"))?;
         let xml = response.text().await.map_err(|error| error.to_string())?;
         if !status_ok(&xml) {
-            return Err(format!("Namecheap 更新解析失败：{}", xml.chars().take(240).collect::<String>()));
+            return Err(format!(
+                "Namecheap 更新解析失败：{}",
+                xml.chars().take(240).collect::<String>()
+            ));
         }
-        Ok(DdnsResult { zone_id: zone.into(), record_id: String::new() })
+        Ok(DdnsResult {
+            zone_id: zone.into(),
+            record_id: String::new(),
+        })
     }
 }
 
@@ -173,8 +239,14 @@ mod tests {
 
     #[test]
     fn splits_zone() {
-        assert_eq!(zone_parts("example.com").unwrap(), ("example".into(), "com".into()));
-        assert_eq!(zone_parts("example.co.uk").unwrap(), ("example".into(), "co.uk".into()));
+        assert_eq!(
+            zone_parts("example.com").unwrap(),
+            ("example".into(), "com".into())
+        );
+        assert_eq!(
+            zone_parts("example.co.uk").unwrap(),
+            ("example".into(), "co.uk".into())
+        );
     }
 
     #[test]
