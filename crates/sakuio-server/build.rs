@@ -26,4 +26,6 @@ fn main() {
     println!("cargo:rustc-env=SAKUIO_BUILD_EPOCH={epoch}");
     println!("cargo:rustc-env=SAKUIO_BUILD_COMMIT={commit}");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=SAKUIO_BUILD_COMMIT");
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
 }
