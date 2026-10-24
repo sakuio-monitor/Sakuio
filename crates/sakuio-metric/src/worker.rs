@@ -449,8 +449,10 @@ fn spawn_worker(
             }
         }
         let mut pending: Vec<crate::store::BucketRow> = Vec::new();
+        let mut dirty: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut current: Arc<MetricStore> = store_rx.borrow().clone();
         let mut last_flush = tokio::time::Instant::now();
+        let mut last_wal_checkpoint = tokio::time::Instant::now();
         loop {
             tokio::select! {
                 biased;
@@ -467,6 +469,7 @@ fn spawn_worker(
                         return;
                     };
                     current = store_rx.borrow().clone();
+                    dirty.insert(job.node_uuid.clone());
                     let policy_snapshot = policy.read().await.clone();
                     for sample in &job.samples {
                         pending.extend(aggregator.push(&job.node_uuid, sample, &policy_snapshot));
@@ -494,12 +497,25 @@ fn spawn_worker(
                     if !pending.is_empty() {
                         flush_pending(&current, &mut pending).await;
                     }
-                    // Persist open windows in the compact checkpoint table,
-                    // never as full metric_buckets rows.
-                    let open = aggregator.snapshot();
-                    if !open.is_empty() {
-                        if let Err(e) = current.save_checkpoints(&open).await {
-                            tracing::warn!(error = %e, "metric checkpoint save failed");
+                    if last_wal_checkpoint.elapsed() >= std::time::Duration::from_secs(60) {
+                        if let Err(e) = current.checkpoint_wal().await {
+                            tracing::warn!(error = %e, "wal checkpoint failed");
+                        }
+                        last_wal_checkpoint = tokio::time::Instant::now();
+                    }
+                    // Persist only nodes that reported since the last
+                    // checkpoint; unchanged open windows are already durable.
+                    if !dirty.is_empty() {
+                        let open = aggregator.snapshot_for(&dirty);
+                        if !open.is_empty() {
+                            match current.save_checkpoints(&open).await {
+                                Ok(()) => dirty.clear(),
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "metric checkpoint save failed");
+                                }
+                            }
+                        } else {
+                            dirty.clear();
                         }
                     }
                     last_flush = tokio::time::Instant::now();

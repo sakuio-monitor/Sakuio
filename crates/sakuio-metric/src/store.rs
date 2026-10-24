@@ -605,37 +605,57 @@ impl MetricStore {
     /// Persists the open-window aggregator snapshot, one JSON row per node.
     pub async fn save_checkpoints(&self, rows: &[BucketRow]) -> Result<(), MetricError> {
         use std::collections::HashMap;
+        if rows.is_empty() {
+            return Ok(());
+        }
         let mut by_node: HashMap<&str, Vec<&BucketRow>> = HashMap::new();
         for row in rows {
             by_node.entry(row.node_uuid.as_str()).or_default().push(row);
         }
-        if by_node.is_empty() {
-            return Ok(());
-        }
         let table = self.table("checkpoints");
         let now = chrono::Utc::now().timestamp_millis();
         let mut tx = self.pool.begin().await?;
-        for (node, node_rows) in by_node {
-            let payload = serde_json::to_string(&node_rows).map_err(MetricError::Json)?;
+        let entries: Vec<(&str, String)> = by_node
+            .into_iter()
+            .map(|(node, node_rows)| {
+                serde_json::to_string(&node_rows)
+                    .map(|payload| (node, payload))
+                    .map_err(MetricError::Json)
+            })
+            .collect::<Result<_, _>>()?;
+        // One multi-row upsert instead of one statement per node. 200 rows
+        // keeps the bind count below SQLite's 999-variable limit.
+        for chunk in entries.chunks(200) {
+            let values = vec!["(?, ?, ?)"; chunk.len()].join(", ");
             let sql = match self.dialect {
                 DbKind::MySql => format!(
-                    "INSERT INTO {table} (node_uuid, checkpoint_ms, payload) VALUES (?, ?, ?) \
+                    "INSERT INTO {table} (node_uuid, checkpoint_ms, payload) VALUES {values} \
                      ON DUPLICATE KEY UPDATE checkpoint_ms = VALUES(checkpoint_ms), payload = VALUES(payload)"
                 ),
                 _ => format!(
-                    "INSERT INTO {table} (node_uuid, checkpoint_ms, payload) VALUES (?, ?, ?) \
+                    "INSERT INTO {table} (node_uuid, checkpoint_ms, payload) VALUES {values} \
                      ON CONFLICT (node_uuid) DO UPDATE SET \
                      checkpoint_ms = excluded.checkpoint_ms, payload = excluded.payload"
                 ),
             };
-            sqlx::query(&sql)
-                .bind(node.to_string())
-                .bind(now)
-                .bind(payload)
-                .execute(&mut tx)
-                .await?;
+            let mut query = sqlx::query(&sql);
+            for (node, payload) in chunk {
+                query = query.bind(*node).bind(now).bind(payload);
+            }
+            query.execute(&mut tx).await?;
         }
         tx.commit().await?;
+        Ok(())
+    }
+
+    /// Reclaims SQLite WAL pages without blocking readers or writers.
+    /// 无阻塞回收 SQLite WAL 页，避免运行中 WAL 持续膨胀。
+    pub async fn checkpoint_wal(&self) -> Result<(), MetricError> {
+        if self.dialect == DbKind::Sqlite {
+            sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
+                .execute(self.read_pool())
+                .await?;
+        }
         Ok(())
     }
 

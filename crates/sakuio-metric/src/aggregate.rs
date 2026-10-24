@@ -235,8 +235,20 @@ impl BucketAggregator {
     /// Snapshot of all currently open windows without resetting them.
     /// Used for periodic durability checkpoints.
     pub fn snapshot(&self) -> Vec<BucketRow> {
+        self.snapshot_filter(|_| true)
+    }
+
+    /// Snapshot only the nodes that reported since the last checkpoint.
+    pub fn snapshot_for(&self, nodes: &std::collections::HashSet<String>) -> Vec<BucketRow> {
+        self.snapshot_filter(|node| nodes.contains(node))
+    }
+
+    fn snapshot_filter(&self, include: impl Fn(&str) -> bool) -> Vec<BucketRow> {
         let mut rows = Vec::new();
         for (node, state) in &self.nodes {
+            if !include(node) {
+                continue;
+            }
             for (window, win) in &state.windows {
                 if win.counts.values().sum::<i64>() > 0 {
                     rows.extend(flush_window(node, *window, win));
