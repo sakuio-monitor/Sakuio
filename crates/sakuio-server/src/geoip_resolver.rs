@@ -99,6 +99,13 @@ fn mem_read(ip: &str) -> Option<(String, String)> {
 
 fn mem_insert(ip: &str, code: &str, location: &str, ttl: Duration) {
     if let Ok(mut map) = mem().write() {
+        if map.len() > 16_384 {
+            let now = Instant::now();
+            map.retain(|_, entry| entry.expires_at > now);
+            if map.len() > 16_384 {
+                map.clear();
+            }
+        }
         map.insert(
             ip.to_string(),
             CacheEntry {
@@ -113,6 +120,18 @@ fn mem_insert(ip: &str, code: &str, location: &str, ttl: Duration) {
 fn inflight() -> &'static StdMutex<HashMap<String, Arc<AsyncMutex<()>>>> {
     static STORE: OnceLock<StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>> = OnceLock::new();
     STORE.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn release_inflight(ip: &str, lock: &Arc<AsyncMutex<()>>) {
+    // Remove the per-IP mutex once no waiter holds it. Keeping an entry per
+    // unique IP forever was an unbounded growth path for audit/public traffic.
+    if Arc::strong_count(lock) <= 2 {
+        if let Ok(mut map) = inflight().lock() {
+            if map.get(ip).is_some_and(|entry| Arc::ptr_eq(entry, lock)) {
+                map.remove(ip);
+            }
+        }
+    }
 }
 
 /// Durable, shared IP geolocation engine.
@@ -147,12 +166,16 @@ impl GeoEngine {
             let mut map = inflight()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if map.len() > 4096 {
+                map.retain(|_, entry| Arc::strong_count(entry) > 1);
+            }
             map.entry(ip.to_string())
                 .or_insert_with(|| Arc::new(AsyncMutex::new(())))
                 .clone()
         };
         let _guard = lock.lock().await;
         if let Some((code, location)) = mem_read(ip) {
+            release_inflight(ip, &lock);
             return Some(GeoInfo {
                 country_code: code,
                 location,
@@ -162,6 +185,7 @@ impl GeoEngine {
         if let Ok(Some(row)) = GeoCacheRepository::new(&self.pool).get(ip).await {
             if row.expires_at > now {
                 mem_insert(ip, &row.country_code, &row.location, jittered_ttl());
+                release_inflight(ip, &lock);
                 if row.country_code.is_empty() && row.location.is_empty() {
                     return None;
                 }
@@ -195,6 +219,7 @@ impl GeoEngine {
             tracing::warn!(ip = %ip, error = %error, "persist ip geo cache failed");
         }
         mem_insert(ip, &code, &location, ttl);
+        release_inflight(ip, &lock);
         info
     }
 
@@ -222,6 +247,9 @@ impl GeoEngine {
         if let Ok(mut map) = mem().write() {
             let now = Instant::now();
             map.retain(|_, entry| entry.expires_at > now);
+        }
+        if let Ok(mut map) = inflight().lock() {
+            map.retain(|_, entry| Arc::strong_count(entry) > 1);
         }
         let Ok(rows) = ClientRepository::new(&self.pool)
             .list_for_public_api()

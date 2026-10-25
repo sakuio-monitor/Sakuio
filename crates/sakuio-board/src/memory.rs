@@ -90,6 +90,14 @@ impl BoardStateStore for MemoryBoardStore {
             payload,
         };
         entry.commands.push(env.clone());
+        // Commands are pull-based and cursors are monotonic. Keep only a
+        // bounded recent window so a long-lived offline node cannot grow this
+        // vector forever.
+        const MAX_COMMANDS_PER_NODE: usize = 512;
+        if entry.commands.len() > MAX_COMMANDS_PER_NODE {
+            let drop_count = entry.commands.len() - MAX_COMMANDS_PER_NODE;
+            entry.commands.drain(..drop_count);
+        }
         Ok(env)
     }
 

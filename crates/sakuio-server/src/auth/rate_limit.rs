@@ -11,6 +11,7 @@ const FREEZE: Duration = Duration::from_secs(30 * 60);
 struct Entry {
     failures: u32,
     blocked_until: Option<Instant>,
+    last_failure: Instant,
 }
 
 fn table() -> &'static Mutex<HashMap<String, Entry>> {
@@ -34,10 +35,19 @@ pub fn record_failure(ip: &str) {
     let Ok(mut guard) = table().lock() else {
         return;
     };
+    // Drop entries that have been inactive longer than the freeze window.
+    // Without this, every failed source address stayed in the map forever.
+    guard.retain(|_, entry| {
+        entry
+            .blocked_until
+            .map_or_else(|| now.duration_since(entry.last_failure) < FREEZE, |until| until > now)
+    });
     let entry = guard.entry(ip.to_string()).or_insert(Entry {
         failures: 0,
         blocked_until: None,
+        last_failure: now,
     });
+    entry.last_failure = now;
     entry.failures = entry.failures.saturating_add(1);
     if entry.failures >= MAX_FAILURES {
         entry.blocked_until = Some(now + FREEZE);
