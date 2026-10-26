@@ -56,18 +56,26 @@ pub fn client_ip(headers: &HeaderMap, addr: Option<SocketAddr>) -> String {
             "eo-connecting-ip",
             "cf-connecting-ip",
             "true-client-ip",
+            "fastly-client-ip",
             "x-client-ip",
             "x-cluster-client-ip",
+            "x-original-forwarded-for",
             "x-forwarded-for",
+            "x-forwarded",
             "x-real-ip",
+            "x-proxy-user-ip",
+            "x-azure-clientip",
+            "x-appengine-remote-addr",
+            "x-original-ip",
             "forwarded",
         ] {
             if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
                 let candidate = if name == "forwarded" {
-                    value
+                    let first = value.split(',').next().unwrap_or(value);
+                    first
                         .split(';')
                         .find_map(|part| part.trim().strip_prefix("for="))
-                        .unwrap_or(value)
+                        .unwrap_or(first)
                 } else {
                     value.split(',').next().unwrap_or(value)
                 };
@@ -236,6 +244,27 @@ mod client_ip_tests {
         assert_eq!(client_ip(&headers, proxy_addr()), "203.0.113.9");
         headers.insert("x-real-ip", HeaderValue::from_static("[2001:db8::1]:443"));
         assert_eq!(client_ip(&headers, proxy_addr()), "2001:db8::1");
+    }
+
+    #[test]
+    fn reads_common_cdn_and_proxy_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("fastly-client-ip", HeaderValue::from_static("203.0.113.20"));
+        assert_eq!(client_ip(&headers, proxy_addr()), "203.0.113.20");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-original-forwarded-for",
+            HeaderValue::from_static("203.0.113.21, 198.51.100.10"),
+        );
+        assert_eq!(client_ip(&headers, proxy_addr()), "203.0.113.21");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "forwarded",
+            HeaderValue::from_static("for=\"[2001:db8::2]:443\";proto=https"),
+        );
+        assert_eq!(client_ip(&headers, proxy_addr()), "2001:db8::2");
     }
 
     #[test]
