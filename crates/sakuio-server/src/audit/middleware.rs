@@ -53,12 +53,13 @@ pub fn client_ip(headers: &HeaderMap, addr: Option<SocketAddr>) -> String {
     });
     if trusted_hop {
         for name in [
+            "eo-connecting-ip",
             "cf-connecting-ip",
             "true-client-ip",
-            "x-real-ip",
             "x-client-ip",
             "x-cluster-client-ip",
             "x-forwarded-for",
+            "x-real-ip",
             "forwarded",
         ] {
             if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
@@ -235,6 +236,20 @@ mod client_ip_tests {
         assert_eq!(client_ip(&headers, proxy_addr()), "203.0.113.9");
         headers.insert("x-real-ip", HeaderValue::from_static("[2001:db8::1]:443"));
         assert_eq!(client_ip(&headers, proxy_addr()), "2001:db8::1");
+    }
+
+    #[test]
+    fn prefers_forwarded_client_over_cdn_real_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.10"));
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.9, 198.51.100.10"),
+        );
+        assert_eq!(client_ip(&headers, proxy_addr()), "203.0.113.9");
+
+        headers.insert("eo-connecting-ip", HeaderValue::from_static("203.0.113.11"));
+        assert_eq!(client_ip(&headers, proxy_addr()), "203.0.113.11");
     }
 
     #[test]
