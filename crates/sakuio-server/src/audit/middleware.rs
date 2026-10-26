@@ -10,10 +10,20 @@ use axum::{
 };
 use sakuio_db::NewAuditLog;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::audit::sanitize;
 use crate::auth::AdminUser;
 use crate::AppState;
+
+static TRUST_PROXY_HEADERS: AtomicBool = AtomicBool::new(false);
+
+/// Enables trusting forwarding headers even when the immediate peer is public.
+/// This is safe only when the origin is reachable exclusively through a CDN or
+/// reverse proxy; direct clients could otherwise spoof their audit IP.
+pub fn set_trust_proxy_headers(enabled: bool) {
+    TRUST_PROXY_HEADERS.store(enabled, Ordering::Relaxed);
+}
 
 const MAX_CAPTURED_BODY: usize = 16 * 1024;
 const MAX_USER_AGENT: usize = 512;
@@ -45,12 +55,13 @@ fn should_audit(method: &Method, path: &str) -> bool {
 pub fn client_ip(headers: &HeaderMap, addr: Option<SocketAddr>) -> String {
     // Only trust forwarding headers from a local/private hop. A direct public
     // client must not be able to choose its own audit IP.
-    let trusted_hop = addr.is_some_and(|addr| match addr.ip() {
-        std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
-        std::net::IpAddr::V6(ip) => {
-            ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
-        }
-    });
+    let trusted_hop = TRUST_PROXY_HEADERS.load(Ordering::Relaxed)
+        || addr.is_some_and(|addr| match addr.ip() {
+            std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+            std::net::IpAddr::V6(ip) => {
+                ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+            }
+        });
     if trusted_hop {
         for name in [
             "eo-connecting-ip",

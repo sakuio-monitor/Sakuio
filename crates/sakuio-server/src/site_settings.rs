@@ -31,6 +31,8 @@ pub struct SiteSettings {
     pub ws_origin_check_enabled: bool,
     pub ws_allowed_origins: Vec<String>,
     pub ssrf_protection: bool,
+    #[serde(default)]
+    pub trust_proxy_headers: bool,
     pub show_partial_ip: bool,
     pub agent_connect_address: String,
     pub private_site: bool,
@@ -72,6 +74,7 @@ impl Default for SiteSettings {
             ws_origin_check_enabled: false,
             ws_allowed_origins: Vec::new(),
             ssrf_protection: false,
+            trust_proxy_headers: false,
             show_partial_ip: false,
             agent_connect_address: String::new(),
             private_site: false,
@@ -313,6 +316,9 @@ pub async fn put_site_settings(
     if let Some(v) = body.ssrf_protection {
         settings.ssrf_protection = v;
     }
+    if let Some(v) = body.trust_proxy_headers {
+        settings.trust_proxy_headers = v;
+    }
     if let Some(v) = body.show_partial_ip {
         settings.show_partial_ip = v;
     }
@@ -359,6 +365,7 @@ pub async fn put_site_settings(
         || settings.geoip_mmdb_url != previous_mmdb_url;
     match save(&state, &settings).await {
         Ok(()) => {
+            crate::audit::set_trust_proxy_headers(settings.trust_proxy_headers);
             if geo_source_changed {
                 state.geo.clear_persistent().await;
             }
@@ -560,6 +567,7 @@ pub struct SiteSettingsBody {
     pub ws_origin_check_enabled: Option<bool>,
     pub ws_allowed_origins: Option<Vec<String>>,
     pub ssrf_protection: Option<bool>,
+    pub trust_proxy_headers: Option<bool>,
     pub show_partial_ip: Option<bool>,
     pub agent_connect_address: Option<String>,
     pub private_site: Option<bool>,

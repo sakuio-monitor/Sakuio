@@ -8,7 +8,7 @@ mod sanitize;
 
 pub use action::{category_actions, classify};
 pub use logger::{now, prune_older_than, AuditLogger};
-pub use middleware::{audit_admin_layer, client_ip};
+pub use middleware::{audit_admin_layer, client_ip, set_trust_proxy_headers};
 
 use crate::geoip_resolver::GeoEngine;
 use sakuio_db::{AuditLogRepository, DbPool, NewAuditLog};
