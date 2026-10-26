@@ -16,6 +16,14 @@ use sakuio_db::ClientRepository;
 use sakuio_db::DbPool;
 use sakuio_protocol::{ControlMessage, TelemetryBatch};
 use std::sync::Arc;
+use std::time::Duration;
+
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const HEARTBEAT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn heartbeat_expired(idle: Duration) -> bool {
+    idle >= HEARTBEAT_IDLE_TIMEOUT
+}
 
 /// Default HTTP path for the agent WebSocket link.
 /// Agent WebSocket 链路的默认 HTTP 路径。
@@ -156,8 +164,22 @@ async fn link_event_loop(
     node_uuid: &str,
     session_id: &str,
 ) -> Result<(), String> {
+    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = heartbeat.tick() => {
+                if heartbeat_expired(session.idle_for()) {
+                    tracing::warn!(
+                        node_uuid = %node_uuid,
+                        session_id = %session_id,
+                        idle = session.idle_for().as_secs(),
+                        "agent websocket heartbeat timeout"
+                    );
+                    return Err("agent websocket heartbeat timeout".into());
+                }
+                session.ping().await?;
+            }
             outbound = cmd_rx.recv() => {
                 match outbound {
                     Some(msg) => {
@@ -195,5 +217,18 @@ async fn link_event_loop(
                 }
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::*;
+
+    #[test]
+    fn heartbeat_timeout_only_after_idle_window() {
+        assert!(!heartbeat_expired(Duration::from_secs(299)));
+        assert!(heartbeat_expired(Duration::from_secs(300)));
+        assert!(heartbeat_expired(Duration::from_secs(301)));
     }
 }

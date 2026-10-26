@@ -13,6 +13,14 @@ pub trait BoardSession: Send {
     /// Receives the next frame, or `None` when the transport closed.
     /// 接收下一帧；传输关闭时返回 `None`。
     async fn recv(&mut self) -> Result<Option<BoardFrame>, String>;
+    /// Sends a transport-level heartbeat. Default transports do not need one.
+    async fn ping(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+    /// Time since the last inbound frame, used to reap half-closed sessions.
+    fn idle_for(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
     /// Returns the server-assigned session identifier.
     /// 返回服务端分配的会话标识。
     fn session_id(&self) -> &str;

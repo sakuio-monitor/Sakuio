@@ -9,13 +9,18 @@ use sakuio_protocol::{decode_sktl, encode_sktl, ControlMessage, TelemetryBatch};
 pub struct WsBoardSession {
     session_id: String,
     socket: WebSocket,
+    last_activity: std::time::Instant,
 }
 
 impl WsBoardSession {
     /// Wraps an upgraded WebSocket with a server-assigned session id.
     /// 用服务端分配的 session id 包装已升级的 WebSocket。
     pub fn new(session_id: String, socket: WebSocket) -> Self {
-        Self { session_id, socket }
+        Self {
+            session_id,
+            socket,
+            last_activity: std::time::Instant::now(),
+        }
     }
 }
 
@@ -37,12 +42,24 @@ impl BoardSession for WsBoardSession {
         self.socket.send(msg).await.map_err(|e| e.to_string())
     }
 
+    async fn ping(&mut self) -> Result<(), String> {
+        self.socket
+            .send(Message::Ping(Vec::new()))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn idle_for(&self) -> std::time::Duration {
+        self.last_activity.elapsed()
+    }
+
     async fn recv(&mut self) -> Result<Option<BoardFrame>, String> {
         loop {
             let Some(next) = self.socket.next().await else {
                 return Ok(None);
             };
             let msg = next.map_err(|e| e.to_string())?;
+            self.last_activity = std::time::Instant::now();
             match msg {
                 Message::Text(text) => {
                     let bytes = text.as_bytes();
@@ -66,7 +83,8 @@ impl BoardSession for WsBoardSession {
                         .map_err(|e| e.to_string())?;
                     continue;
                 }
-                Message::Pong(_) | Message::Close(_) => return Ok(None),
+                Message::Pong(_) => continue,
+                Message::Close(_) => return Ok(None),
             }
         }
     }
